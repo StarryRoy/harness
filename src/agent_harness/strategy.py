@@ -1,18 +1,23 @@
-"""Replaceable graph-building strategy and the Phase 1 ReAct implementation."""
+"""Replaceable graph-building strategy and the Phase 2 ReAct implementation."""
+
+from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
 
+from .context import AgentContextManager
 from .debug import DebugHandler
 from .definition import AgentDefinition
-from .skills import SkillError, SkillRegistry
-from .state import AgentState
+from .middleware import MiddlewarePipeline, ModelRequest, ToolRequest
+from .skills import SkillError, SkillRegistry, SkillScriptRunner
+from .state import compose_state_schema
 
 
 class AgentStrategy(ABC):
@@ -24,72 +29,159 @@ class AgentStrategy(ABC):
         definition: AgentDefinition,
         skills: SkillRegistry,
         debug: DebugHandler,
+        *,
+        context: AgentContextManager,
+        middleware: MiddlewarePipeline,
+        checkpointer: Any = None,
     ) -> Any:
         """Return a compiled LangGraph runnable."""
 
 
 class ReActStrategy(AgentStrategy):
-    """Standard model -> tools -> model loop."""
+    """Standard model -> tools -> model loop with centralized context."""
 
     def build_graph(
         self,
         definition: AgentDefinition,
         skills: SkillRegistry,
         debug: DebugHandler,
+        *,
+        context: AgentContextManager,
+        middleware: MiddlewarePipeline,
+        checkpointer: Any = None,
     ) -> Any:
-        tool_map = {tool.name: tool for tool in definition.tools}
-        load_skill = self._skill_tool(skills, set(tool_map), debug)
-        all_tools: list[BaseTool] = list(definition.tools)
-        if skills.list():
-            if load_skill.name in tool_map:
-                raise ValueError(f"Tool name is reserved by the harness: {load_skill.name}")
-            all_tools.append(load_skill)
+        business_tools = {tool.name: tool for tool in definition.tools}
+        internal_tools = self._skill_tools(
+            skills,
+            set(business_tools),
+            SkillScriptRunner(definition.runtime_config.script_timeout_seconds),
+            debug,
+        )
+        overlap = set(business_tools).intersection(tool.name for tool in internal_tools)
+        if overlap:
+            raise ValueError(
+                "Tool names are reserved by the Harness: " + ", ".join(sorted(overlap))
+            )
+        all_tools: list[BaseTool] = [*definition.tools, *internal_tools]
         executable = {tool.name: tool for tool in all_tools}
         model = definition.model.bind_tools(all_tools) if all_tools else definition.model
 
-        def prompt(state: AgentState) -> list[Any]:
-            sections = [definition.instructions.strip()]
-            available = state.get("available_skills", [])
-            if available:
-                catalog = "\n".join(f"- {item['name']}: {item['description']}" for item in available)
-                sections.append(
-                    "Available skills (only summaries are shown). Call load_skill before using one:\n"
-                    + catalog
-                )
-            for name in state.get("loaded_skills", []):
-                sections.append(skills.get(name).context())
-            return [SystemMessage(content="\n\n".join(filter(None, sections))), *state["messages"]]
+        def prompt(state: Mapping[str, Any]) -> list[Any]:
+            execution = middleware.current_execution()
+            return context.build_messages(state, execution.business_context)
 
-        def model_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-            debug.emit("MODEL CALL", iteration=state.get("iteration", 0) + 1)
-            response = model.invoke(prompt(state), config)
-            return {"messages": [response], "iteration": state.get("iteration", 0) + 1}
+        def prepare_node(state: Mapping[str, Any]) -> dict[str, Any]:
+            return context.prepare_turn(state)
 
-        async def async_model_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-            debug.emit("MODEL CALL", iteration=state.get("iteration", 0) + 1)
-            response = await model.ainvoke(prompt(state), config)
-            return {"messages": [response], "iteration": state.get("iteration", 0) + 1}
+        def prepare_route(state: Mapping[str, Any]) -> Literal["summarize", "model"]:
+            return "summarize" if context.needs_summary(state) else "model"
 
-        def route(state: AgentState) -> Literal["tools", "format", "done"]:
+        def call_model(
+            target: Any,
+            state: Mapping[str, Any],
+            config: RunnableConfig,
+            messages: list[Any],
+            purpose: str,
+        ) -> Any:
+            request = ModelRequest(
+                middleware.current_execution(), state, messages, config, purpose=purpose
+            )
+            return middleware.model(request, lambda req: target.invoke(req.messages, req.config))
+
+        async def acall_model(
+            target: Any,
+            state: Mapping[str, Any],
+            config: RunnableConfig,
+            messages: list[Any],
+            purpose: str,
+        ) -> Any:
+            request = ModelRequest(
+                middleware.current_execution(), state, messages, config, purpose=purpose
+            )
+            return await middleware.amodel(
+                request, lambda req: target.ainvoke(req.messages, req.config)
+            )
+
+        def model_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            iteration = int(state.get("iteration", 0)) + 1
+            debug.emit("MODEL CALL", iteration=iteration)
+            response = call_model(model, state, config, prompt(state), "agent")
+            return {"messages": [response], "iteration": iteration}
+
+        async def async_model_node(
+            state: Mapping[str, Any], config: RunnableConfig
+        ) -> dict[str, Any]:
+            iteration = int(state.get("iteration", 0)) + 1
+            debug.emit("MODEL CALL", iteration=iteration)
+            response = await acall_model(model, state, config, prompt(state), "agent")
+            return {"messages": [response], "iteration": iteration}
+
+        def summarize_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            old, _ = context.split_for_summary(state)
+            if not old:
+                return {}
+            messages = context.summary_prompt(state.get("summary"), old)
+            response = call_model(definition.model, state, config, messages, "summary")
+            removals = [RemoveMessage(id=item.id) for item in old if item.id]
+            return {"summary": str(response.content), "messages": removals}
+
+        async def async_summarize_node(
+            state: Mapping[str, Any], config: RunnableConfig
+        ) -> dict[str, Any]:
+            old, _ = context.split_for_summary(state)
+            if not old:
+                return {}
+            messages = context.summary_prompt(state.get("summary"), old)
+            response = await acall_model(definition.model, state, config, messages, "summary")
+            removals = [RemoveMessage(id=item.id) for item in old if item.id]
+            return {"summary": str(response.content), "messages": removals}
+
+        def route(state: Mapping[str, Any]) -> Literal["tools", "format", "done"]:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
-                if state.get("iteration", 0) >= definition.runtime_config.max_iterations:
+                if int(state.get("iteration", 0)) >= definition.runtime_config.max_iterations:
                     raise RuntimeError(
                         f"Agent exceeded max_iterations={definition.runtime_config.max_iterations}"
                     )
                 return "tools"
             return "format" if definition.response_format is not None else "done"
 
-        def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-            return self._execute_tools(state, executable, config, debug)
+        def tool_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            return self._execute_tools(
+                state,
+                executable,
+                set(business_tools),
+                set(definition.subagent_names),
+                skills,
+                middleware,
+                config,
+                debug,
+            )
 
-        async def async_tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-            return await self._aexecute_tools(state, executable, config, debug)
+        async def async_tool_node(
+            state: Mapping[str, Any], config: RunnableConfig
+        ) -> dict[str, Any]:
+            return await self._aexecute_tools(
+                state,
+                executable,
+                set(business_tools),
+                set(definition.subagent_names),
+                skills,
+                middleware,
+                config,
+                debug,
+            )
 
-        graph = StateGraph(AgentState)
+        graph = StateGraph(compose_state_schema(definition.state_schema))
+        graph.add_node("prepare", prepare_node)
+        graph.add_node("summarize", RunnableLambda(summarize_node, async_summarize_node))
         graph.add_node("model", RunnableLambda(model_node, async_model_node))
         graph.add_node("tools", RunnableLambda(tool_node, async_tool_node))
-        graph.add_edge(START, "model")
+        graph.add_edge(START, "prepare")
+        graph.add_conditional_edges(
+            "prepare", prepare_route, {"summarize": "summarize", "model": "model"}
+        )
+        graph.add_edge("summarize", "model")
         destinations: dict[str, Any] = {"tools": "tools", "done": END}
         if definition.response_format is not None:
             destinations["format"] = "format"
@@ -99,88 +191,246 @@ class ReActStrategy(AgentStrategy):
         if definition.response_format is not None:
             formatter = definition.model.with_structured_output(definition.response_format)
 
-            def format_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-                return {"structured_response": formatter.invoke(prompt(state), config)}
+            def format_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+                result = call_model(formatter, state, config, prompt(state), "format")
+                return {"structured_response": result}
 
-            async def async_format_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-                return {"structured_response": await formatter.ainvoke(prompt(state), config)}
+            async def async_format_node(
+                state: Mapping[str, Any], config: RunnableConfig
+            ) -> dict[str, Any]:
+                result = await acall_model(formatter, state, config, prompt(state), "format")
+                return {"structured_response": result}
 
             graph.add_node("format", RunnableLambda(format_node, async_format_node))
             graph.add_edge("format", END)
-        return graph.compile()
+        return graph.compile(checkpointer=checkpointer)
 
     @staticmethod
-    def _skill_tool(
-        registry: SkillRegistry, tool_names: set[str], debug: DebugHandler
-    ) -> StructuredTool:
-        def load_skill(name: str) -> str:
-            """Load a named skill's complete instructions and references into context."""
-            skill = registry.get(name)
-            missing = sorted(set(skill.metadata.required_tools) - tool_names)
-            if missing:
-                raise SkillError(
-                    f"Skill '{name}' requires unavailable tools: {', '.join(missing)}"
-                )
-            debug.emit("SKILL LOAD", name=name)
-            return f"Skill '{name}' loaded. Its instructions are now available."
+    def _skill_tools(
+        registry: SkillRegistry,
+        tool_names: set[str],
+        runner: SkillScriptRunner,
+        debug: DebugHandler,
+    ) -> list[BaseTool]:
+        if not registry.list():
+            return []
 
-        return StructuredTool.from_function(load_skill, name="load_skill")
+        def load_skill(name: str) -> str:
+            """Load a candidate skill and all of its dependencies into agent context."""
+            ordered = registry.load_order(name, tool_names)
+            debug.emit("SKILL LOAD", name=name, dependencies=[item.identifier for item in ordered[:-1]])
+            return "Loaded skills: " + ", ".join(item.identifier for item in ordered)
+
+        def unload_skill(name: str) -> str:
+            """Unload a skill from the current agent context."""
+            skill = registry.get(name)
+            return f"Skill '{skill.identifier}' unloaded."
+
+        def read_skill_reference(skill: str, name: str) -> str:
+            """Read one named UTF-8 reference from an already loaded skill."""
+            return registry.get(skill).read_reference(name)
+
+        def read_skill_resource(skill: str, name: str) -> dict[str, Any]:
+            """Read one named text or binary resource from an already loaded skill."""
+            return registry.get(skill).read_resource(name)
+
+        def run_skill_script(
+            skill: str, script: str, arguments: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
+            """Run a declared skill script with JSON arguments."""
+            target = registry.get(skill)
+            debug.emit("SKILL SCRIPT", skill=target.identifier, script=script)
+            return runner.run(target, script, arguments).as_dict()
+
+        tools: list[BaseTool] = [
+            StructuredTool.from_function(load_skill, name="load_skill"),
+            StructuredTool.from_function(unload_skill, name="unload_skill"),
+        ]
+        if any(skill.references for skill in registry.list()):
+            tools.append(
+                StructuredTool.from_function(read_skill_reference, name="read_skill_reference")
+            )
+        if any(skill.resources for skill in registry.list()):
+            tools.append(
+                StructuredTool.from_function(read_skill_resource, name="read_skill_resource")
+            )
+        if any(skill.script_files for skill in registry.list()):
+            tools.append(StructuredTool.from_function(run_skill_script, name="run_skill_script"))
+        return tools
 
     @staticmethod
     def _result(call: dict[str, Any], value: Any) -> ToolMessage:
         content = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
         return ToolMessage(content=content, tool_call_id=call["id"], name=call["name"])
 
+    @staticmethod
+    def _require_loaded(
+        call: Mapping[str, Any], loaded: list[str], registry: SkillRegistry
+    ) -> None:
+        if call["name"] not in {
+            "read_skill_reference",
+            "read_skill_resource",
+            "run_skill_script",
+        }:
+            return
+        reference = call["args"].get("skill")
+        identifier = registry.get(reference).identifier
+        if identifier not in loaded:
+            raise SkillError(f"Skill '{identifier}' must be loaded before using its assets")
+
+    @staticmethod
+    def _skill_state_after(
+        call: Mapping[str, Any],
+        loaded: list[str],
+        skill_state: dict[str, dict[str, Any]],
+        registry: SkillRegistry,
+        tool_names: set[str],
+        turn: int,
+    ) -> tuple[list[str], dict[str, dict[str, Any]], str | None]:
+        active = loaded[-1] if loaded else None
+        if call["name"] == "load_skill":
+            ordered = registry.load_order(call["args"]["name"], tool_names)
+            for skill in ordered:
+                if skill.identifier not in loaded:
+                    loaded.append(skill.identifier)
+                details = dict(skill_state.get(skill.identifier, {}))
+                details.setdefault("loaded_at", turn)
+                details["last_used"] = turn
+                skill_state[skill.identifier] = details
+            active = ordered[-1].identifier
+        elif call["name"] == "unload_skill":
+            identifier = registry.get(call["args"]["name"]).identifier
+            removed = {identifier, *registry.dependents_of(identifier, loaded)}
+            loaded = [item for item in loaded if item not in removed]
+            for item in removed:
+                skill_state.pop(item, None)
+            active = loaded[-1] if loaded else None
+        elif call["name"] in {
+            "read_skill_reference",
+            "read_skill_resource",
+            "run_skill_script",
+        }:
+            identifier = registry.get(call["args"]["skill"]).identifier
+            details = dict(skill_state.get(identifier, {}))
+            details["last_used"] = turn
+            skill_state[identifier] = details
+            active = identifier
+        return loaded, skill_state, active
+
     def _execute_tools(
         self,
-        state: AgentState,
+        state: Mapping[str, Any],
         tools: dict[str, BaseTool],
+        business_tool_names: set[str],
+        subagent_names: set[str],
+        registry: SkillRegistry,
+        middleware: MiddlewarePipeline,
         config: RunnableConfig,
         debug: DebugHandler,
     ) -> dict[str, Any]:
         calls = state["messages"][-1].tool_calls
         loaded = list(state.get("loaded_skills", []))
+        skill_state = dict(state.get("skill_state", {}))
+        active = state.get("active_skill")
         results = []
         for call in calls:
             if call["name"] not in tools:
                 raise ValueError(f"Model requested unknown tool: {call['name']}")
+            if call["name"] in subagent_names:
+                debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
             debug.emit("TOOL CALL", name=call["name"])
+            succeeded = False
             try:
-                value = tools[call["name"]].invoke(call["args"], config)
-                if call["name"] == "load_skill":
-                    name = call["args"]["name"]
-                    if name not in loaded:
-                        loaded.append(name)
-            except Exception as exc:
+                self._require_loaded(call, loaded, registry)
+                request = ToolRequest(
+                    middleware.current_execution(),
+                    tools[call["name"]],
+                    call["args"],
+                    config,
+                    call["id"],
+                )
+                value = middleware.tool(
+                    request, lambda req: req.tool.invoke(req.arguments, req.config)
+                )
+                succeeded = True
+            except Exception as exc:  # noqa: BLE001 - tool failures are observations
                 debug.emit("ERROR", error=str(exc))
                 value = f"Error: {exc}"
+            if succeeded:
+                loaded, skill_state, active = self._skill_state_after(
+                    call,
+                    loaded,
+                    skill_state,
+                    registry,
+                    business_tool_names,
+                    int(state.get("session_turn", 1)),
+                )
             debug.emit("TOOL RESULT", name=call["name"], result=value)
+            if call["name"] in subagent_names:
+                debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
             results.append(self._result(call, value))
-        return {"messages": results, "loaded_skills": loaded, "active_skill": loaded[-1] if loaded else None}
+        return {
+            "messages": results,
+            "loaded_skills": loaded,
+            "active_skill": active,
+            "skill_state": skill_state,
+        }
 
     async def _aexecute_tools(
         self,
-        state: AgentState,
+        state: Mapping[str, Any],
         tools: dict[str, BaseTool],
+        business_tool_names: set[str],
+        subagent_names: set[str],
+        registry: SkillRegistry,
+        middleware: MiddlewarePipeline,
         config: RunnableConfig,
         debug: DebugHandler,
     ) -> dict[str, Any]:
         calls = state["messages"][-1].tool_calls
         loaded = list(state.get("loaded_skills", []))
+        skill_state = dict(state.get("skill_state", {}))
+        active = state.get("active_skill")
         results = []
         for call in calls:
             if call["name"] not in tools:
                 raise ValueError(f"Model requested unknown tool: {call['name']}")
+            if call["name"] in subagent_names:
+                debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
             debug.emit("TOOL CALL", name=call["name"])
+            succeeded = False
             try:
-                value = await tools[call["name"]].ainvoke(call["args"], config)
-                if call["name"] == "load_skill":
-                    name = call["args"]["name"]
-                    if name not in loaded:
-                        loaded.append(name)
-            except Exception as exc:
+                self._require_loaded(call, loaded, registry)
+                request = ToolRequest(
+                    middleware.current_execution(),
+                    tools[call["name"]],
+                    call["args"],
+                    config,
+                    call["id"],
+                )
+                value = await middleware.atool(
+                    request, lambda req: req.tool.ainvoke(req.arguments, req.config)
+                )
+                succeeded = True
+            except Exception as exc:  # noqa: BLE001 - tool failures are observations
                 debug.emit("ERROR", error=str(exc))
                 value = f"Error: {exc}"
+            if succeeded:
+                loaded, skill_state, active = self._skill_state_after(
+                    call,
+                    loaded,
+                    skill_state,
+                    registry,
+                    business_tool_names,
+                    int(state.get("session_turn", 1)),
+                )
             debug.emit("TOOL RESULT", name=call["name"], result=value)
+            if call["name"] in subagent_names:
+                debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
             results.append(self._result(call, value))
-        return {"messages": results, "loaded_skills": loaded, "active_skill": loaded[-1] if loaded else None}
+        return {
+            "messages": results,
+            "loaded_skills": loaded,
+            "active_skill": active,
+            "skill_state": skill_state,
+        }
