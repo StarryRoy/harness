@@ -1,188 +1,139 @@
-# Phase 2 Prompt：SubAgent + Middleware + Session/Context + Skills Advanced
+# Phase 2：SubAgent + Middleware + Session/Context + Skills Advanced
 
-你现在要在 **已经完成 Phase 1 的 Agent Harness 项目** 上继续开发 Phase 2。
+基于当前 已经完成的 Phase 1 继续开发。先阅读现有代码，**不要推翻重构
 
-请先阅读现有代码，复用 Phase 1 已有的 `Agent`、`create_agent()`、`AgentRuntime`、`AgentStrategy`、`ReActStrategy`、Tool 接入和 Skills Core。
+核心原则：
 
-**不要推翻 Phase 1 重写，也不要用 LangChain `create_agent()` 替换现有 Runtime。**
-
-本期目标是：让 Harness 支持公司内部最重要的 **Main Agent + SubAgent** 架构，并补齐 Middleware、多轮 Session、基础 Context Manager，以及可长期使用的 Skills Advanced。
-
----
-
-# 一、延续的总体原则
-
-1. LangGraph 继续作为 Runtime 内核。
-2. LangGraph 已有的 State / Checkpoint / Streaming 等能力直接使用。
-3. LangChain 只作为成熟组件库选择性复用。
-4. 不开发 RAG、数据库、文件等具体通用工具。
-5. 不开发前端。
-6. 不开发测试框架和 Eval 平台。
-7. Observability 仍然只保留最简单 Debug。
-8. 不开发 Phase 3 的 Plan & Execute、完整 HITL、MCP 等高级功能。
+* LangGraph 继续作为 Runtime。
+* LangGraph 已有能力直接复用。
+* 普通应用开发者应尽可能少配置，合理功能提供默认值。
+* 高级能力保留可覆盖接口。
+* 不开发测试体系。
+* Observability 仍只保留极简 Debug。
 
 ---
 
-# 二、本期目标
+# 1. SubAgent
 
-Phase 2 完成后必须支持：
-
-```python
-nvh_agent = create_agent(
-    name="nvh_agent",
-    model=model,
-    instructions="...",
-    tools=[...],
-    skills=[...],
-)
-
-cae_agent = create_agent(
-    name="cae_agent",
-    model=model,
-    instructions="...",
-    tools=[...],
-    skills=[...],
-)
-
-main_agent = create_agent(
-    name="main_agent",
-    model=model,
-    instructions="...",
-    subagents=[nvh_agent, cae_agent],
-    middleware=[...],
-)
-```
-
-执行：
+实现公司主要多 Agent 模式：
 
 ```text
-User
-↓
 Main Agent
-├→ NVH Agent
-│   ├→ Skill
-│   └→ Tool
-├→ CAE Agent
-│   ├→ Skill
-│   └→ Tool
-↓
-Main Agent 汇总
-↓
-Final
+→ SubAgent as Tool
+→ Main Agent 汇总
 ```
 
-并支持真正的多轮 Session。
-
----
-
-# 三、SubAgent / Supervisor
-
-公司内部不同业务板块相对独立，因此本期采用：
-
-> **Main Agent → SubAgent as Tool → Main Agent 汇总**
-
-这是一项核心能力。
-
----
-
-## 1. Agent.as_tool()
+## 1.1 Agent.as_tool()
 
 为 `Agent` 增加：
 
 ```python
-agent.as_tool(...)
+agent.as_tool()
 ```
 
-它把一个 Agent 转换成主 Agent 可以调用的 Tool。
+将 Agent 包装为标准 Tool。
 
-至少暴露：
+至少包含：
 
 ```text
 name
 description
-input schema
-output schema
+input
+output
 ```
 
-内部执行仍调用该 SubAgent 自己的 Runtime，例如：
-
-```text
-AgentTool
-↓
-sub_agent.invoke()/ainvoke()
-↓
-SubAgent Result
-```
-
-不要复制一份 SubAgent Runtime。
+内部直接调用 SubAgent 自己的 Runtime。
 
 ---
 
-## 2. create_agent(subagents=...)
+## 1.2 create_agent(subagents=...)
 
-`create_agent()` 增加：
-
-```python
-subagents=[...]
-```
-
-Harness 自动把 SubAgent 转换成 Main Agent 可使用的 Tool 能力。
-
-应用层不应该手动重复写：
+支持：
 
 ```python
-sub_agent.as_tool()
+main_agent = create_agent(
+    name="main",
+    instructions="...",
+    subagents=[
+        agent_a,
+        agent_b,
+    ],
+)
 ```
 
-才能完成常用场景；`as_tool()` 应保留给高级自定义使用。
+Harness 自动执行：
+
+```text
+SubAgent
+→ AgentTool
+→ Main Agent Tool List
+```
+
+应用层无需手动调用 `as_tool()`。
 
 ---
 
-## 3. SubAgent 独立性
+## 1.3 SubAgent 独立性
 
-每个 SubAgent 必须保留自己的：
+业务层只需要定义：
 
 ```text
+name
+description
 instructions
 tools
 skills
-state
-context
-runtime
-middleware
+model（可选）
+response_format（可选）
+state_schema（可选）
 ```
 
-不同业务团队可以独立开发自己的 Agent。
-
-Main Agent 不读取 SubAgent 的完整内部 State。
-
----
-
-## 4. SubAgent Context Isolation
-
-默认策略：
+Harness 自动管理并隔离：
 
 ```text
-Main Agent 根据当前问题/任务
-↓
-生成给 SubAgent 的任务输入
-↓
-SubAgent 在自己的 Context 中执行
-↓
-返回最终结果
+Runtime
+Harness State
+Context
+Session execution scope
+Middleware
+Checkpoint
+Skill State
+Debug
+Error handling
 ```
 
-禁止默认把 Main Agent 全部消息、全部 State、全部 Skill 内容完整传给 SubAgent。
-
-需要保留清晰的 Context 边界。
+Main Agent 不直接访问 SubAgent 完整 State。
 
 ---
 
-## 5. SubAgent Result Contract
+## 1.4 Context Isolation
 
-定义统一 SubAgent 返回结构。
+默认：
 
-至少包括：
+```text
+Main Agent
+→ 生成明确的 SubAgent Task
+→ SubAgent 独立执行
+→ 返回结果
+→ Main Agent 继续 ReAct
+```
+
+默认禁止把 Main Agent 的：
+
+```text
+完整 messages
+完整 State
+loaded_skills
+内部 Runtime 数据
+```
+
+全部传给 SubAgent。
+
+---
+
+## 1.5 SubAgent Result
+
+定义统一内部返回结构，例如：
 
 ```text
 content
@@ -191,102 +142,80 @@ metadata
 error
 ```
 
-要求：
-
-1. Main Agent 默认只获取业务结果。
-2. 不把 SubAgent 完整内部 State 塞回 Main Agent Context。
-3. Error 能被 Main Agent 感知并继续决定下一步。
-4. metadata 保持轻量，便于以后扩展。
+Main Agent 默认只接收业务结果和必要错误信息，不接收 SubAgent 完整执行轨迹。
 
 ---
 
-## 6. 多次 SubAgent 调用
+# 2. 默认配置原则
 
-ReAct 主 Agent 必须支持：
+Phase 2 开始正式贯彻：
 
-```text
-Main
-→ Agent A
-→ Main
-→ Agent B
-→ Main
-→ Final
-```
+> 默认开箱即用，高级用户按需覆盖。
 
-是否继续调用其他 SubAgent 由 Main Agent ReAct 决定。
-
-本期不开发复杂固定 Supervisor Workflow。
-
----
-
-## 7. 本期 Multi-Agent 不做
-
-```text
-Handoff
-Peer-to-peer Agent Network
-Swarm
-复杂 DAG Multi-Agent
-自动负载调度
-复杂 Agent 并发框架
-```
-
----
-
-# 四、Middleware Framework
-
-本期正式建立 Middleware 扩展机制。
-
-Middleware 定义：
-
-> 对 Agent Runtime 生命周期中的通用横切能力进行可插拔封装。
-
-它不是 Tool，也不是 Skill。
-
----
-
-## 1. Middleware Contract
-
-建立轻量统一接口，例如：
+普通 Agent：
 
 ```python
-class AgentMiddleware:
-    def before_agent(...): ...
-    def before_model(...): ...
-    def wrap_model_call(...): ...
-    def after_model(...): ...
-    def wrap_tool_call(...): ...
-    def after_agent(...): ...
+agent = create_agent(
+    name="nvh",
+    instructions="...",
+    tools=[...],
+    skills=[...],
+)
 ```
 
-可以根据 Python 代码风格使用 sync/async 兼容设计，但不要创造复杂框架。
+即可运行。
+
+Harness 应提供合理默认值，例如：
+
+```text
+model
+strategy = ReAct
+middleware
+retry
+timeout
+call_limit
+context policy
+checkpointer
+subagent isolation policy
+debug
+```
+
+高级用户有需求时允许覆盖。
+
+不要要求普通应用开发者理解 LangGraph Runtime 细节。
 
 ---
 
-## 2. Pipeline
+# 3. Middleware
 
-Runtime 统一执行 Middleware。
+建立统一 Middleware 扩展机制。
 
-必须保证执行顺序稳定、可预测。
+至少支持生命周期：
 
-本期选择一个简单方案即可：
+```text
+before_agent
+before_model
+wrap_model_call
+after_model
+wrap_tool_call
+after_agent
+```
+
+Middleware Pipeline 必须有稳定执行顺序。
+
+本期直接使用简单方案：
 
 ```text
 注册顺序
 ```
 
-或：
-
-```text
-priority
-```
-
-不要开发 Middleware Dependency Graph。
+不要开发复杂依赖图。
 
 ---
 
-## 3. 首批 Built-in Middleware
+## 3.1 默认 Middleware
 
-只实现最有价值的少量功能：
+提供少量默认能力：
 
 ```text
 RetryMiddleware
@@ -294,79 +223,105 @@ TimeoutMiddleware
 CallLimitMiddleware
 ```
 
-如果 Timeout 受到底层库限制，保证接口设计合理并实现可行部分，不要为了 Timeout 重造 Runtime。
+普通应用层不传 `middleware` 时自动使用默认配置。
 
-### Retry
-
-至少支持 Model Call / Tool Call 中合理的 retry 配置。
-
-### CallLimit
-
-至少能限制：
-
-```text
-max_model_calls
-max_tool_calls
-```
-
-避免异常死循环。
-
----
-
-## 4. 一级能力不要强迫应用层手写 Middleware
-
-例如 Skills 仍然是：
+高级用户允许：
 
 ```python
-skills=[...]
+create_agent(
+    ...,
+    middleware=[...],
+)
 ```
 
-Session 仍然是 Agent API。
+覆盖或扩展默认行为。
 
-即使内部部分能力通过 Middleware 实现，也不要泄漏给普通应用开发者。
+Middleware 是高级扩展接口，不要求普通业务开发者理解。
 
 ---
 
-# 五、Session + Checkpoint
+# 4. State 扩展
 
-本期增加真正的多轮 Session。
+Harness 保留自己的默认 State，例如：
 
-应用层示例：
+```text
+messages
+iteration
+runtime_metadata
+loaded_skills
+active_skill
+```
+
+这些由 Harness 自动维护。
+
+同时允许高级业务定义额外业务状态：
+
+```python
+class BusinessState(TypedDict, total=False):
+    project_id: str
+    approval_status: str
+```
+
+通过：
+
+```python
+create_agent(
+    ...,
+    state_schema=BusinessState,
+)
+```
+
+实现。
+
+最终概念上是：
+
+```text
+Harness State
++
+Business State
+```
+
+业务自定义 State 不能覆盖 Harness 保留字段。
+
+---
+
+# 5. Session
+
+公开高层接口：
 
 ```python
 agent.invoke(
-    "继续刚才的问题",
+    "...",
     session_id="session-001",
 )
 ```
 
-Harness 内部将：
+应用层只使用 `session_id`。
+
+Harness 内部负责：
 
 ```text
 session_id
-↓
-映射到 LangGraph thread_id
-↓
-Checkpointer
+→ LangGraph thread_id
+→ Checkpointer
 ```
+
+不要向普通应用层暴露 `thread_id`。
 
 要求：
 
-1. 同一 `session_id` 可以连续多轮对话。
-2. 不同 Session 状态隔离。
-3. 使用 LangGraph Checkpointer，不自己实现另一套 Persistence。
-4. 应用层不需要理解 `thread_id`。
-5. Checkpointer 实现应可替换，例如开发期内存，后续可换持久化实现。
-
-不需要本期开发复杂数据库 Checkpoint 管理平台。
+* 同一 `session_id` 支持多轮。
+* 不同 Session 隔离。
+* Checkpointer 可替换。
+* 不重新实现 LangGraph Persistence。
 
 ---
 
-# 六、Context Manager
+# 6. Context Manager
 
-Phase 1 只有基础 Context，本期建立明确的 Context 组装机制。
+建立统一 Context 组装逻辑。
 
-本次 Model Call 的 Context 可能包含：
+Model Context 主要来自：
 
 ```text
 Agent Instructions
@@ -374,78 +329,54 @@ Session Messages
 Loaded Skills
 Tool Results
 SubAgent Results
-Runtime Context
+Business Runtime Context
 ```
 
-本期重点不是复杂算法，而是：
+要求：
 
-```text
-谁能进入 Context
-进入顺序
-什么时候保留
-什么时候删除
-```
+* 不让各 Node 自己随意拼 Prompt。
+* SubAgent 默认只返回最终结果。
+* Tool Result 不允许无限堆积。
+* Skill Context 有明确生命周期。
 
----
-
-## 1. Context 组装顺序
-
-请定义清晰、统一、容易维护的 Context 构建流程。
-
-不要让各个 Node 自己拼 Prompt。
+本期不做复杂 Context Engineering。
 
 ---
 
-## 2. Tool Result Context
+# 7. 基础 Summarization
 
-避免非常大的 Tool Result 永久无限堆积。
-
-本期可以先做简单策略，例如：
-
-```text
-保留最近结果
-或对超大结果进行长度限制/简单处理
-```
-
-不要开发复杂 Context Compression Engine。
-
----
-
-## 3. SubAgent Result Context
-
-Main Agent 默认只加入 SubAgent 的最终 Result，不加入内部完整轨迹。
-
----
-
-## 4. Basic Summarization
-
-支持长 Session 的基础 Summarization。
-
-建议：
+长 Session 支持简单摘要：
 
 ```text
 达到阈值
-↓
-摘要旧 messages
-↓
-保存 summary
-↓
-保留最近消息
+→ 摘要旧 messages
+→ 保存 summary
+→ 保留最近 messages
 ```
 
-优先复用成熟能力。
+优先复用成熟实现。
 
-不自研复杂摘要算法，不做长期 Memory。
-
----
-
-# 七、Skills Advanced
-
-Skills 是本项目核心，本期需要从“能用”提升到“适合各业务团队长期维护”。
+不要自研复杂压缩算法。
 
 ---
 
-## 1. Skill Dependencies
+# 8. Skills Advanced
+
+Phase 1 已有：
+
+```text
+Skill
+Metadata
+Loader
+Registry
+Progressive Disclosure
+```
+
+本期继续增强。
+
+---
+
+## 8.1 Dependencies
 
 真正实现：
 
@@ -453,217 +384,184 @@ Skills 是本项目核心，本期需要从“能用”提升到“适合各业�
 Skill A depends on Skill B
 ```
 
-至少支持：
+支持：
 
 ```text
 依赖检查
-自动加载必要依赖
-循环依赖检测
+依赖加载
 缺失依赖错误
+循环依赖检测
 ```
 
-不要做类似 pip 的复杂 Resolver。
+不要开发复杂包管理器。
 
 ---
 
-## 2. required_tools
+## 8.2 required_tools
 
-完善 Phase 1 的 `required_tools`。
-
-加载 Skill 前：
+Skill 加载前检查：
 
 ```text
-检查 required_tools
-↓
-缺失则拒绝加载
-↓
-返回清晰错误
+required_tools
 ```
+
+缺失时拒绝加载并返回明确错误。
 
 ---
 
-## 3. References 按需加载
+## 8.3 References
 
-Skill 结构：
+支持 `references/` 按需读取。
 
-```text
-SKILL.md
-references/
-```
-
-不能默认把所有 references 全部塞入 Context。
-
-提供统一的按需读取能力。
+不要加载 Skill 时自动把全部 references 放进 Context。
 
 ---
 
-## 4. Resources
+## 8.4 Resources
 
-正式支持：
+支持：
 
 ```text
 resources/
 ```
 
-用于：
+用于模板、示例、配置、静态资源。
 
-```text
-模板
-示例
-配置
-静态业务资源
-```
-
-提供统一访问接口。
-
-不要把资源内容全部自动加入 Prompt。
+提供统一读取接口，不自动全部加入 Prompt。
 
 ---
 
-## 5. Scripts
+## 8.5 Scripts
 
-正式支持：
+支持：
 
 ```text
 scripts/
 ```
 
-核心思想：
+原则：
 
 ```text
-LLM 负责判断与编排
+LLM 负责判断和编排
 Script 负责确定性执行
 ```
 
 要求：
 
-1. Skill 可以声明/引用自己的 Script。
-2. Script 执行走统一入口。
-3. 不允许 Skill 随意执行任意系统路径代码。
-4. 基础参数、返回值、错误能够统一处理。
-5. 本期不需要做完整 Sandbox 平台。
+* Skill 可以声明 Script。
+* Script 统一入口执行。
+* 参数、结果、错误统一处理。
+* 不允许任意系统路径代码执行。
+* 本期不开发完整 Sandbox。
 
 ---
 
-## 6. Skill Validation
+## 8.6 Skill Validation
 
-Skill 加载时统一检查：
+统一检查：
 
 ```text
-目录结构
+目录
 Metadata
 SKILL.md
-required_tools
 dependencies
+required_tools
 references
 resources
 scripts
 ```
 
-错误必须明确指出 Skill 和具体问题。
+错误必须明确指出具体 Skill 和具体问题。
 
 ---
 
-## 7. Skill Version
+## 8.7 Version
 
 支持：
 
 ```text
+skill_name + version
+```
+
+例如：
+
+```text
+analysis@1.0
+analysis@2.0
+```
+
+不开发版本发布平台。
+
+---
+
+## 8.8 Dynamic Skill Discovery
+
+当 Skill 数量较多时，不要始终把所有 Skill 描述送入模型。
+
+先筛选候选 Skill，再暴露：
+
+```text
 name
-version
+description
 ```
 
-至少可以区分：
+可以使用：
 
 ```text
-skill-a@1.0
-skill-a@2.0
-```
-
-不开发发布平台、远程 Registry、Marketplace。
-
----
-
-## 8. Skill Compatibility
-
-实现轻量兼容约束即可，例如：
-
-```text
-required_tools
-minimum_harness_version
-required_capabilities
-```
-
-只做当前实际有价值的约束。
-
----
-
-## 9. Dynamic Skill Discovery
-
-当 Agent Skill 较多时，不应永远把全部描述都放进 Context。
-
-实现一个轻量选择机制。
-
-可采用简单方式：
-
-```text
-Metadata Filter
+metadata
 关键词
-简单语义匹配（如现有组件实现容易）
+简单语义匹配
 ```
 
-目标：先筛出少量候选 Skill，再将其 name/description 暴露给 Agent。
-
-不要开发独立 Skill Search Service。
+不要建设独立 Skill 搜索服务。
 
 ---
 
-## 10. Skill Context 生命周期
+## 8.9 Skill Context Lifecycle
 
 明确：
 
 ```text
 什么时候加载
 什么时候 active
-什么时候保持
+什么时候保留
 什么时候卸载
-什么时候只留下必要结果
 ```
 
-避免长 Session 中已加载 Skill 内容无限累积。
+防止长 Session 中 Skill 内容无限累积。
 
 ---
 
-## 11. SubAgent Skill Isolation
+## 8.10 SubAgent Skill Isolation
 
-不同 Agent 必须保持：
+不同 Agent 必须保持独立：
 
 ```text
-Skill Registry 独立
-Loaded Skill State 独立
-Active Skill 独立
-Skill Context 独立
+SkillRegistry
+loaded_skills
+active_skill
+Skill Context
 ```
 
-Main Agent 不自动继承所有 SubAgent Skills。
+Main Agent 不继承 SubAgent Skills。
 
 ---
 
-# 八、Debug / Observability
+# 9. Debug
 
-继续保持极低优先级。
+继续保持极简。
 
-在 Phase 1 基础上，只增加必要事件：
+在 Phase 1 基础上增加必要信息：
 
 ```text
 SUBAGENT CALL
 SUBAGENT RESULT
-MIDDLEWARE
 SESSION
+MIDDLEWARE
 SKILL SCRIPT
 ```
 
-仍然可以使用：
+仍允许：
 
 ```text
 print
@@ -671,145 +569,67 @@ JSON
 MD
 ```
 
-不要开发正式 Tracing / Metrics / Dashboard。
+不要开发正式 Tracing、Metrics、Dashboard。
 
----
 
-# 九、Testing
+# 11. 验收
 
-**仍然不开发测试框架或 Eval 平台。**
+必须完整跑通：
 
-不要因为增加 SubAgent/Skill 就主动建设大规模 mock、benchmark、dataset。
-
-只保证代码职责清晰、依赖可注入，未来能测试即可。
-
----
-
-# 十、建议代码结构调整
-
-在 Phase 1 代码基础上按需扩展，例如：
-
-```text
-harness/
-├── agent.py
-├── definition.py
-├── runtime.py
-├── state.py
-├── strategy/
-│   ├── base.py
-│   └── react.py
-├── subagents/
-│   ├── tool.py
-│   └── result.py
-├── middleware/
-│   ├── base.py
-│   ├── pipeline.py
-│   ├── retry.py
-│   ├── timeout.py
-│   └── limits.py
-├── session.py
-├── context.py
-├── skills/
-│   ├── models.py
-│   ├── loader.py
-│   ├── registry.py
-│   ├── validation.py
-│   └── scripts.py
-└── debug.py
-```
-
-结构可以根据现有项目优化，不要机械重构。
-
----
-
-# 十一、本期明确不做
-
-```text
-Plan & Execute
-Reflection
-HITL 完整实现
-Tool Approval
-Guardrail 系统
-MCP
-Long-Term Memory
-正式 Observability
-OpenTelemetry
-LangSmith Integration
-Testing Framework
-Agent Eval
-复杂权限平台
-Skill Marketplace
-Skill Governance Platform
-复杂 Sandbox
-任何 RAG / DB / 文件等具体通用工具研发
-```
-
----
-
-# 十二、Phase 2 验收标准
-
-必须完整跑通以下场景。
-
-## 场景 A：Main + 一个 SubAgent
+### SubAgent
 
 ```text
 User
 → Main
-→ SubAgent
+→ SubAgent A
+→ Main
+→ SubAgent B
 → Main
 → Final
 ```
 
-## 场景 B：Main + 多 SubAgent
-
-```text
-User
-→ Main
-→ Agent A
-→ Main
-→ Agent B
-→ Main
-→ Final
-```
-
-## 场景 C：SubAgent 使用 Skill + Tool
+### SubAgent + Skill
 
 ```text
 Main
 → SubAgent
 → Skill Discovery
-→ Load Skill
-→ Tool/Script
-→ SubAgent Final
+→ Skill Load
+→ Tool / Script
+→ SubAgent Result
 → Main
 ```
 
-## 场景 D：多轮 Session
+### Session
 
 ```text
-session-001 第 1 轮
-session-001 第 2 轮继续上下文
-session-002 与 session-001 隔离
+session-A 多轮保持上下文
+session-B 与 session-A 隔离
 ```
 
-## 场景 E：Middleware
+### Middleware
 
-Retry / CallLimit 等能够通过统一 Middleware Pipeline 工作，不侵入具体业务 Agent。
+默认无需业务配置即可生效，高级用户可以自定义。
 
-## 场景 F：Advanced Skills
+### State
 
-至少验证：
+默认 Harness State 自动管理；业务 `state_schema` 可以增加自定义字段，不能破坏 Harness 内部字段。
+
+### Skills Advanced
+
+验证：
 
 ```text
-依赖 Skill
+dependencies
 required_tools
-reference 按需读取
-resource 访问
-script 统一执行
-Skill version
-Skill validation
-Context 生命周期
-SubAgent Skill Isolation
+references 按需加载
+resources
+scripts
+validation
+version
+dynamic discovery
+context lifecycle
+SubAgent skill isolation
 ```
 
-达到以上闭环即可结束 Phase 2，不要主动进入 Phase 3。
+完成以上内容即结束 Phase 2
