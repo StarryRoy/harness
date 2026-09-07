@@ -397,20 +397,27 @@ class SkillRegistry:
         skills = list(self._skills.values())
         if query:
             lowered = query.casefold()
-            tokens = set(re.findall(r"[\w-]+", lowered))
+            tokens = set(re.findall(r"[a-z0-9_-]+", lowered))
+            query_cjk = self._cjk_ngrams(lowered)
 
             def score(skill: Skill) -> tuple[int, str]:
                 fields = " ".join(
                     [skill.name, skill.metadata.description, *skill.metadata.tags]
                 ).casefold()
-                field_tokens = set(re.findall(r"[\w-]+", fields))
-                points = len(tokens.intersection(field_tokens)) * 3
+                field_tokens = set(re.findall(r"[a-z0-9_-]+", fields))
+                field_cjk = self._cjk_ngrams(fields)
+                points = len(tokens.intersection(field_tokens)) * 4
                 points += sum(
-                    2
+                    3 if len(gram) == 3 else 2
+                    for gram in query_cjk.intersection(field_cjk)
+                )
+                points += sum(
+                    6
                     for value in (skill.name, *skill.metadata.tags)
                     if value.casefold() in lowered
                 )
-                points += int(skill.metadata.description.casefold() in lowered)
+                points += 8 if lowered in fields else 0
+                points += 4 if skill.metadata.description.casefold() in lowered else 0
                 return points, skill.identifier
 
             ranked = sorted(skills, key=score, reverse=True)
@@ -422,6 +429,17 @@ class SkillRegistry:
             {"name": skill.identifier, "description": skill.metadata.description}
             for skill in skills
         )
+
+    @staticmethod
+    def _cjk_ngrams(text: str) -> set[str]:
+        grams: set[str] = set()
+        for sequence in re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]+", text):
+            for size in (2, 3):
+                grams.update(
+                    sequence[index : index + size]
+                    for index in range(len(sequence) - size + 1)
+                )
+        return grams
 
 
 @dataclass(frozen=True, slots=True)

@@ -65,8 +65,9 @@ def create_agent(
     runtime_config: RuntimeConfig | None = None,
     strategy: AgentStrategy | None = None,
     middleware: Sequence[AgentMiddleware] | None = None,
-    middleware_mode: str = "replace",
+    middleware_mode: str = "extend",
     checkpointer: Any | None = None,
+    session_namespace: str | None = None,
 ) -> Agent:
     """Validate configuration, compile the graph, and return an Agent."""
     config = runtime_config or RuntimeConfig()
@@ -124,5 +125,6 @@ def create_agent(
         strategy or ReActStrategy(),
         registry,
         checkpointer if checkpointer is not None else MemorySaver(),
+        session_namespace=session_namespace,
     )
     return Agent(definition, runtime)

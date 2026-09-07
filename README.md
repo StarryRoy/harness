@@ -31,7 +31,9 @@ print(state["messages"][-1].content)
 
 `invoke` / `ainvoke` / `stream` / `astream` 均支持 `session_id`。同一 ID 通过
 LangGraph Checkpointer 保持上下文，不同 ID 隔离；应用层不接触 `thread_id`。
-可向 `create_agent(checkpointer=...)` 传入其他 LangGraph Checkpointer。
+默认 Session namespace 使用稳定的 Agent name，因此重新创建同名 Agent 后仍可从
+持久化 Checkpointer 恢复。高级用户可用 `session_namespace="service-a"` 区分同名
+Agent，并可向 `create_agent(checkpointer=...)` 传入其他 LangGraph Checkpointer。
 
 模型也可通过 `configure_default_model(model)` 配置一次后省略。若安装了可选的
 `langchain` 及相应 Provider 集成，也可传模型字符串或设置
@@ -72,8 +74,13 @@ before_agent -> before_model -> wrap_model_call -> after_model
 ```
 
 Before 按注册顺序执行，Wrapper 的第一个注册项位于最外层，After 逆序执行。
-传 `middleware=[...]` 会替换默认项；传 `middleware_mode="extend"` 会追加到默认项。
+传 `middleware=[...]` 默认按“内置 Middleware 在前、自定义 Middleware 在后”的
+稳定顺序追加；只有显式传 `middleware_mode="replace"` 才完全替换默认项。
 自定义中间件继承 `AgentMiddleware`，异步特殊逻辑可覆盖对应的 `a...` 方法。
+
+`TimeoutMiddleware` 的异步路径使用可取消的 `asyncio.wait_for`。同步 Model/Tool
+调用无法可靠取消，因此同步路径直接执行、不制造后台残留任务或由 timeout 引发的
+重复调用；需要强制超时时应使用异步接口及底层客户端自身的 timeout。
 
 默认超时、重试、调用上限和 Context 策略由 `RuntimeConfig` 配置：
 

@@ -26,6 +26,8 @@ class AgentRuntime:
         strategy: AgentStrategy,
         skills: SkillRegistry,
         checkpointer: Any,
+        *,
+        session_namespace: str | None = None,
     ) -> None:
         self.definition = definition
         self.debug = DebugHandler(
@@ -36,7 +38,13 @@ class AgentRuntime:
             definition.instructions, skills, definition.runtime_config.context_policy
         )
         self.middleware = MiddlewarePipeline(definition.middleware, self.debug)
-        self._namespace = uuid.uuid4().hex
+        if session_namespace is not None and (
+            not isinstance(session_namespace, str) or not session_namespace.strip()
+        ):
+            raise ValueError("session_namespace must be a non-empty string")
+        self._namespace = (
+            session_namespace.strip() if session_namespace is not None else definition.name
+        )
         self.graph = strategy.build_graph(
             definition,
             skills,

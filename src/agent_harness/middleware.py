@@ -7,8 +7,6 @@ import contextvars
 import inspect
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -156,26 +154,20 @@ class RetryMiddleware(AgentMiddleware):
 
 
 class TimeoutMiddleware(AgentMiddleware):
-    """Apply a wall-clock timeout to individual model and tool calls."""
+    """Apply cancellable timeouts to async model and tool calls.
+
+    Sync calls run inline because Python cannot safely cancel an arbitrary
+    running thread. This avoids returning a timeout while work with possible
+    side effects continues in the background.
+    """
 
     def __init__(self, timeout_seconds: float = 60.0) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self.timeout_seconds = timeout_seconds
 
-    def _run(self, request: Any, call_next: Callable[[Any], Any], label: str) -> Any:
-        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-harness-timeout")
-        future = pool.submit(call_next, request)
-        try:
-            return future.result(timeout=self.timeout_seconds)
-        except FutureTimeoutError as exc:
-            future.cancel()
-            raise TimeoutError(f"{label} timed out after {self.timeout_seconds:g}s") from exc
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
-
     def wrap_model_call(self, request: ModelRequest, call_next: ModelHandler) -> Any:
-        return self._run(request, call_next, "Model call")
+        return call_next(request)
 
     async def awrap_model_call(
         self, request: ModelRequest, call_next: AsyncModelHandler
@@ -186,7 +178,7 @@ class TimeoutMiddleware(AgentMiddleware):
             raise TimeoutError(f"Model call timed out after {self.timeout_seconds:g}s") from exc
 
     def wrap_tool_call(self, request: ToolRequest, call_next: ToolHandler) -> Any:
-        return self._run(request, call_next, f"Tool '{request.tool.name}'")
+        return call_next(request)
 
     async def awrap_tool_call(
         self, request: ToolRequest, call_next: AsyncToolHandler
