@@ -19,32 +19,40 @@ class Store:
 
 
 class Manager:
-    def __init__(self, namespace):
+    def __init__(self, namespace, store, query_limit):
         self.namespace = namespace
+        self.store = store
+        self.query_limit = query_limit
         self.calls = []
 
-    def _write(self, value, config, store):
-        self.calls.append((value, config))
+    def _namespace(self, config):
         configurable = config["configurable"]
-        namespace = tuple(
+        return tuple(
             configurable[part[1:-1]] if part.startswith("{") else part
             for part in self.namespace
         )
-        store.values.setdefault(namespace, []).append({"preference": "tea"})
 
-    def invoke(self, value, *, config, store):
-        self._write(value, config, store)
+    def _write(self, value, config):
+        self.calls.append((value, config))
+        self.store.values.setdefault(self._namespace(config), []).append({"preference": "tea"})
 
-    async def ainvoke(self, value, *, config, store):
-        self._write(value, config, store)
+    def search(self, *, query, config):
+        return self.store.search(self._namespace(config), query=query, limit=self.query_limit)
+
+    def invoke(self, value, *, config):
+        self._write(value, config)
+
+    async def ainvoke(self, value, *, config):
+        self._write(value, config)
 
 
 def test_manager_uses_official_model_store_and_dynamic_namespace(monkeypatch):
     captured = {}
 
-    def create(model, *, namespace, **kwargs):
+    def create(model, *, namespace, store, query_limit, **kwargs):
         captured.update(model=model, namespace=namespace, kwargs=kwargs)
-        return Manager(namespace)
+        captured.update(store=store, query_limit=query_limit)
+        return Manager(namespace, store, query_limit)
 
     monkeypatch.setitem(
         sys.modules,
@@ -58,6 +66,8 @@ def test_manager_uses_official_model_store_and_dynamic_namespace(monkeypatch):
     assert captured == {
         "model": model,
         "namespace": ("memory", "{agent_name}", "{memory_id}"),
+        "store": store,
+        "query_limit": 6,
         "kwargs": {"instructions": "extract"},
     }
 
@@ -68,3 +78,6 @@ def test_manager_uses_official_model_store_and_dynamic_namespace(monkeypatch):
 
     asyncio.run(memory.aupdate("assistant", "user-2", ["likes tea"]))
     assert memory.load("assistant", "user-2", "preference") == [{"preference": "tea"}]
+
+    # The same memory identity remains isolated between agents.
+    assert memory.load("other-assistant", "user-1", "preference") == []
