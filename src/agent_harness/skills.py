@@ -50,7 +50,11 @@ class Skill:
 
     @property
     def identifier(self) -> str:
-        return f"{self.name}@{self.metadata.version}" if self.metadata.version else self.name
+        return (
+            f"{self.name}@{self.metadata.version}"
+            if self.metadata.version
+            else self.name
+        )
 
     @property
     def scripts(self) -> tuple[str, ...]:
@@ -106,18 +110,24 @@ class SkillLoader:
     def load(self, directory: str | Path) -> Skill:
         root = Path(directory).expanduser().resolve()
         if not root.is_dir():
-            raise SkillError(f"Skill directory does not exist or is not a directory: {root}")
+            raise SkillError(
+                f"Skill directory does not exist or is not a directory: {root}"
+            )
         skill_file = root / "SKILL.md"
         if not skill_file.is_file():
             raise SkillError(f"Skill '{root.name}' is missing SKILL.md: {root}")
         try:
             raw = skill_file.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            raise SkillError(f"Skill '{root.name}' SKILL.md must be UTF-8: {skill_file}") from exc
+            raise SkillError(
+                f"Skill '{root.name}' SKILL.md must be UTF-8: {skill_file}"
+            ) from exc
         metadata_dict, instructions = self._parse_frontmatter(raw, skill_file)
         metadata = self._metadata(metadata_dict, skill_file)
         if not instructions.strip():
-            raise SkillError(f"Skill '{metadata.name}' has empty instructions: {skill_file}")
+            raise SkillError(
+                f"Skill '{metadata.name}' has empty instructions: {skill_file}"
+            )
         references = self._files(root, "references", metadata.name)
         resources = self._files(root, "resources", metadata.name)
         available_scripts = self._files(root, "scripts", metadata.name)
@@ -178,7 +188,9 @@ class SkillLoader:
         if not lines or lines[0].strip() != "---":
             raise SkillError(f"SKILL.md must start with YAML frontmatter: {path}")
         try:
-            end = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
+            end = next(
+                i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"
+            )
         except StopIteration as exc:
             raise SkillError(f"Unclosed YAML frontmatter: {path}") from exc
         try:
@@ -193,7 +205,9 @@ class SkillLoader:
     def _metadata(data: dict[str, Any], path: Path) -> SkillMetadata:
         for key in ("name", "description"):
             if not isinstance(data.get(key), str) or not data[key].strip():
-                raise SkillError(f"Skill metadata '{key}' must be a non-empty string: {path}")
+                raise SkillError(
+                    f"Skill metadata '{key}' must be a non-empty string: {path}"
+                )
 
         def strings(key: str) -> tuple[str, ...]:
             value = data.get(key, [])
@@ -202,7 +216,9 @@ class SkillLoader:
             if not isinstance(value, list) or not all(
                 isinstance(item, str) and item.strip() for item in value
             ):
-                raise SkillError(f"Skill metadata '{key}' must be a list of non-empty strings: {path}")
+                raise SkillError(
+                    f"Skill metadata '{key}' must be a list of non-empty strings: {path}"
+                )
             values = tuple(item.strip() for item in value)
             if len(values) != len(set(values)):
                 raise SkillError(f"Skill metadata '{key}' contains duplicates: {path}")
@@ -261,7 +277,9 @@ class SkillValidator:
         SkillValidator._validate_assets(skill, "scripts", skill.script_files)
 
     @staticmethod
-    def _validate_assets(skill: Skill, directory: str, assets: Mapping[str, Path]) -> None:
+    def _validate_assets(
+        skill: Skill, directory: str, assets: Mapping[str, Path]
+    ) -> None:
         if not assets:
             return
         if skill.path is None:
@@ -271,7 +289,11 @@ class SkillValidator:
         root = (skill.path / directory).resolve()
         for name, path in assets.items():
             normalized = Path(name).as_posix()
-            if Path(name).is_absolute() or normalized.startswith("../") or normalized == "..":
+            if (
+                Path(name).is_absolute()
+                or normalized.startswith("../")
+                or normalized == ".."
+            ):
                 raise SkillError(
                     f"Skill '{skill.identifier}' has unsafe {directory} name '{name}'"
                 )
@@ -310,14 +332,18 @@ class SkillRegistry:
             raise SkillError(f"Unknown skill: {reference}")
         if len(candidates) == 1:
             return candidates[0]
-        return max(candidates, key=lambda item: self._version_key(item.metadata.version))
+        return max(
+            candidates, key=lambda item: self._version_key(item.metadata.version)
+        )
 
     @staticmethod
     def _version_key(version: str | None) -> tuple[Any, ...]:
         if version is None:
             return (0,)
         parts = re.split(r"([0-9]+)", version)
-        return tuple((1, int(part)) if part.isdigit() else (0, part.lower()) for part in parts)
+        return tuple(
+            (1, int(part)) if part.isdigit() else (0, part.lower()) for part in parts
+        )
 
     def list(self) -> tuple[Skill, ...]:
         return tuple(self._skills.values())
@@ -467,11 +493,15 @@ class ScriptResult:
 class SkillScriptRunner:
     """Execute declared scripts only, using JSON stdin/stdout as one entry contract."""
 
-    def __init__(self, timeout_seconds: float = 30.0, max_output_bytes: int = 1_000_000) -> None:
+    def __init__(
+        self, timeout_seconds: float = 30.0, max_output_bytes: int = 1_000_000
+    ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
 
-    def run(self, skill: Skill, script: str, arguments: Mapping[str, Any] | None = None) -> ScriptResult:
+    def run(
+        self, skill: Skill, script: str, arguments: Mapping[str, Any] | None = None
+    ) -> ScriptResult:
         path = skill.script_path(script).resolve()
         if skill.path is None:
             raise SkillError(f"Skill '{skill.identifier}' has no trusted directory")
@@ -533,7 +563,9 @@ class SkillScriptRunner:
                 result = json.loads(output)
             except json.JSONDecodeError:
                 result = output
-        return ScriptResult(skill.identifier, script, "success", result=result, stderr=stderr)
+        return ScriptResult(
+            skill.identifier, script, "success", result=result, stderr=stderr
+        )
 
     @staticmethod
     def _command(path: Path) -> list[str]:

@@ -34,10 +34,14 @@ class Manager:
 
     def _write(self, value, config):
         self.calls.append((value, config))
-        self.store.values.setdefault(self._namespace(config), []).append({"preference": "tea"})
+        self.store.values.setdefault(self._namespace(config), []).append(
+            {"preference": "tea"}
+        )
 
     def search(self, *, query, config):
-        return self.store.search(self._namespace(config), query=query, limit=self.query_limit)
+        return self.store.search(
+            self._namespace(config), query=query, limit=self.query_limit
+        )
 
     def invoke(self, value, *, config):
         self._write(value, config)

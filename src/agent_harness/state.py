@@ -36,7 +36,8 @@ def compose_state_schema(business_schema: type | None) -> type:
     conflicts = sorted(HARNESS_STATE_FIELDS.intersection(fields))
     if conflicts:
         raise ValueError(
-            "Business state_schema cannot override Harness fields: " + ", ".join(conflicts)
+            "Business state_schema cannot override Harness fields: "
+            + ", ".join(conflicts)
         )
     combined = dict(AgentState.__annotations__)
     combined.update(fields)

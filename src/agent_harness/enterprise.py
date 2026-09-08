@@ -27,9 +27,18 @@ Guardrail = Callable[[Any], GuardrailResult]
 class GuardrailMiddleware(AgentMiddleware):
     """Apply optional input, tool and output policies without a rule engine."""
 
-    def __init__(self, *, input: Guardrail | None = None, tool: Guardrail | None = None,
-                 output: Guardrail | None = None) -> None:
-        self.input_guardrail, self.tool_guardrail, self.output_guardrail = input, tool, output
+    def __init__(
+        self,
+        *,
+        input: Guardrail | None = None,
+        tool: Guardrail | None = None,
+        output: Guardrail | None = None,
+    ) -> None:
+        self.input_guardrail, self.tool_guardrail, self.output_guardrail = (
+            input,
+            tool,
+            output,
+        )
 
     @staticmethod
     def _apply(result: GuardrailResult, original: Any) -> Any:
@@ -37,20 +46,53 @@ class GuardrailMiddleware(AgentMiddleware):
             raise ValueError(result.reason or "Rejected by guardrail")
         return result.value if result.action == "modify" else original
 
+    @staticmethod
+    def _evaluate(
+        execution: AgentExecution,
+        stage: str,
+        guardrail: Guardrail,
+        subject: Any,
+        original: Any,
+    ) -> Any:
+        result = guardrail(subject)
+        if not isinstance(result, GuardrailResult):
+            raise TypeError("guardrail must return GuardrailResult")
+        if execution.debug is not None:
+            execution.debug.emit(
+                "GUARDRAIL", stage=stage, action=result.action, reason=result.reason
+            )
+        return GuardrailMiddleware._apply(result, original)
+
     def before_agent(self, execution: AgentExecution) -> None:
         if self.input_guardrail:
-            updated = self._apply(self.input_guardrail(execution.input), execution.input)
+            updated = self._evaluate(
+                execution,
+                "input",
+                self.input_guardrail,
+                execution.input,
+                execution.input,
+            )
             if updated is not execution.input:
                 execution.input.clear()
                 execution.input.update(updated)
 
     def wrap_tool_call(self, request: ToolRequest, call_next: Any) -> Any:
         if self.tool_guardrail:
-            request.arguments = self._apply(self.tool_guardrail(request), request.arguments)
+            request.arguments = self._evaluate(
+                request.execution,
+                "tool",
+                self.tool_guardrail,
+                request,
+                request.arguments,
+            )
         return call_next(request)
 
     def after_agent(self, execution: AgentExecution, result: Any) -> Any:
-        return self._apply(self.output_guardrail(result), result) if self.output_guardrail else result
+        return (
+            self._evaluate(execution, "output", self.output_guardrail, result, result)
+            if self.output_guardrail
+            else result
+        )
 
 
 class ModelFallbackMiddleware(AgentMiddleware):
@@ -64,10 +106,17 @@ class ModelFallbackMiddleware(AgentMiddleware):
             return call_next(request)
         except Exception as primary:
             last = primary
-            for model in self.models:
+            for index, model in enumerate(self.models, start=1):
+                if request.execution.debug is not None:
+                    request.execution.debug.emit(
+                        "MODEL FALLBACK",
+                        index=index,
+                        model=type(model).__name__,
+                        primary_error=str(primary),
+                    )
                 try:
                     return request.invoke_with(model)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - continue through configured fallbacks
                     last = exc
             raise last from primary
 
@@ -76,10 +125,17 @@ class ModelFallbackMiddleware(AgentMiddleware):
             return await call_next(request)
         except Exception as primary:
             last = primary
-            for model in self.models:
+            for index, model in enumerate(self.models, start=1):
+                if request.execution.debug is not None:
+                    request.execution.debug.emit(
+                        "MODEL FALLBACK",
+                        index=index,
+                        model=type(model).__name__,
+                        primary_error=str(primary),
+                    )
                 try:
                     return await request.ainvoke_with(model)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - continue through configured fallbacks
                     last = exc
             raise last from primary
 

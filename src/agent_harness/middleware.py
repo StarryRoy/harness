@@ -22,6 +22,7 @@ class AgentExecution:
     business_context: Mapping[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     error: Exception | None = None
+    debug: Any | None = None
 
 
 @dataclass(slots=True)
@@ -143,7 +144,9 @@ class RetryMiddleware(AgentMiddleware):
                     time.sleep(self.delay_seconds)
         raise AssertionError("unreachable")
 
-    async def _arun(self, request: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
+    async def _arun(
+        self, request: Any, call_next: Callable[[Any], Awaitable[Any]]
+    ) -> Any:
         for attempt in range(1, self.max_attempts + 1):
             try:
                 return await call_next(request)
@@ -168,7 +171,11 @@ class RetryMiddleware(AgentMiddleware):
     async def awrap_tool_call(
         self, request: ToolRequest, call_next: AsyncToolHandler
     ) -> Any:
-        return await self._arun(request, call_next) if self.retry_tools else await call_next(request)
+        return (
+            await self._arun(request, call_next)
+            if self.retry_tools
+            else await call_next(request)
+        )
 
 
 class TimeoutMiddleware(AgentMiddleware):
@@ -191,9 +198,13 @@ class TimeoutMiddleware(AgentMiddleware):
         self, request: ModelRequest, call_next: AsyncModelHandler
     ) -> Any:
         try:
-            return await asyncio.wait_for(call_next(request), timeout=self.timeout_seconds)
+            return await asyncio.wait_for(
+                call_next(request), timeout=self.timeout_seconds
+            )
         except asyncio.TimeoutError as exc:
-            raise TimeoutError(f"Model call timed out after {self.timeout_seconds:g}s") from exc
+            raise TimeoutError(
+                f"Model call timed out after {self.timeout_seconds:g}s"
+            ) from exc
 
     def wrap_tool_call(self, request: ToolRequest, call_next: ToolHandler) -> Any:
         return call_next(request)
@@ -202,7 +213,9 @@ class TimeoutMiddleware(AgentMiddleware):
         self, request: ToolRequest, call_next: AsyncToolHandler
     ) -> Any:
         try:
-            return await asyncio.wait_for(call_next(request), timeout=self.timeout_seconds)
+            return await asyncio.wait_for(
+                call_next(request), timeout=self.timeout_seconds
+            )
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
                 f"Tool '{request.tool.name}' timed out after {self.timeout_seconds:g}s"
@@ -309,7 +322,9 @@ class MiddlewarePipeline:
             next_call = call
 
             def wrapped_model(
-                req: ModelRequest, mw: AgentMiddleware = item, nxt: ModelHandler = next_call
+                req: ModelRequest,
+                mw: AgentMiddleware = item,
+                nxt: ModelHandler = next_call,
             ) -> Any:
                 return mw.wrap_model_call(req, nxt)
 
@@ -342,7 +357,11 @@ class MiddlewarePipeline:
         for item in reversed(self.middleware):
             next_call = call
 
-            async def wrapped(req: ModelRequest, mw: AgentMiddleware = item, nxt: AsyncModelHandler = next_call) -> Any:
+            async def wrapped(
+                req: ModelRequest,
+                mw: AgentMiddleware = item,
+                nxt: AsyncModelHandler = next_call,
+            ) -> Any:
                 return await mw.awrap_model_call(req, nxt)
 
             call = wrapped
@@ -365,7 +384,9 @@ class MiddlewarePipeline:
             next_call = call
 
             def wrapped_tool(
-                req: ToolRequest, mw: AgentMiddleware = item, nxt: ToolHandler = next_call
+                req: ToolRequest,
+                mw: AgentMiddleware = item,
+                nxt: ToolHandler = next_call,
             ) -> Any:
                 return mw.wrap_tool_call(req, nxt)
 
@@ -377,7 +398,11 @@ class MiddlewarePipeline:
         for item in reversed(self.middleware):
             next_call = call
 
-            async def wrapped(req: ToolRequest, mw: AgentMiddleware = item, nxt: AsyncToolHandler = next_call) -> Any:
+            async def wrapped(
+                req: ToolRequest,
+                mw: AgentMiddleware = item,
+                nxt: AsyncToolHandler = next_call,
+            ) -> Any:
                 return await mw.awrap_tool_call(req, nxt)
 
             call = wrapped

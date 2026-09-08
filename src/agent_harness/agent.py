@@ -73,7 +73,12 @@ class Agent:
         **kwargs: Any,
     ) -> Iterator[Any]:
         return self.runtime.stream(
-            value, config, session_id=session_id, context=context, memory_id=memory_id, **kwargs
+            value,
+            config,
+            session_id=session_id,
+            context=context,
+            memory_id=memory_id,
+            **kwargs,
         )
 
     def astream(
@@ -87,10 +92,17 @@ class Agent:
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
         return self.runtime.astream(
-            value, config, session_id=session_id, context=context, memory_id=memory_id, **kwargs
+            value,
+            config,
+            session_id=session_id,
+            context=context,
+            memory_id=memory_id,
+            **kwargs,
         )
 
-    def resume(self, *, session_id: str, decision: str | Mapping[str, Any]) -> dict[str, Any]:
+    def resume(
+        self, *, session_id: str, decision: str | Mapping[str, Any]
+    ) -> dict[str, Any]:
         """Resume a paused sensitive tool call with approve/reject/edit."""
         return self.runtime.resume(session_id=session_id, decision=decision)
 
@@ -104,13 +116,17 @@ class Agent:
     ) -> BaseTool:
         """Expose this agent as a task-only tool with isolated runtime state."""
         tool_name = name or self.definition.name
-        tool_description = description or self.definition.description or (
-            f"Delegate a self-contained task to the {self.definition.name} agent."
+        tool_description = (
+            description
+            or self.definition.description
+            or (f"Delegate a self-contained task to the {self.definition.name} agent.")
         )
 
         def run(task: str) -> dict[str, Any]:
             """Delegate one explicit task and return only its final business result."""
-            self.runtime.debug.emit("SUBAGENT CALL", name=self.definition.name, task=task)
+            self.runtime.debug.emit(
+                "SUBAGENT CALL", name=self.definition.name, task=task
+            )
             try:
                 state = self.invoke(task)
                 result = self._subagent_result(state)
@@ -133,7 +149,9 @@ class Agent:
 
         async def arun(task: str) -> dict[str, Any]:
             """Delegate one explicit task and return only its final business result."""
-            self.runtime.debug.emit("SUBAGENT CALL", name=self.definition.name, task=task)
+            self.runtime.debug.emit(
+                "SUBAGENT CALL", name=self.definition.name, task=task
+            )
             try:
                 state = await self.ainvoke(task)
                 result = self._subagent_result(state)
@@ -167,7 +185,11 @@ class Agent:
         else:
             messages = state.get("messages", [])
             final = next(
-                (message for message in reversed(messages) if isinstance(message, AIMessage)),
+                (
+                    message
+                    for message in reversed(messages)
+                    if isinstance(message, AIMessage)
+                ),
                 None,
             )
             content = final.content if final is not None else None

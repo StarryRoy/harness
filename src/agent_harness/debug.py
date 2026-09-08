@@ -18,7 +18,9 @@ class DebugHandler:
         if not self.enabled:
             return
         if self.format == "json":
-            print(json.dumps({"event": event, **details}, default=str, ensure_ascii=False))
+            print(
+                json.dumps({"event": event, **details}, default=str, ensure_ascii=False)
+            )
             return
         suffix = " ".join(f"{key}={value!r}" for key, value in details.items())
         prefix = f"**{event}**" if self.format == "md" else event

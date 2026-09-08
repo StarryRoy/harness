@@ -12,9 +12,9 @@ from langgraph.store.memory import InMemoryStore
 
 from .agent import Agent
 from .definition import AgentDefinition, RuntimeConfig
-from .middleware import AgentMiddleware, default_middleware
 from .enterprise import GuardrailMiddleware, ModelFallbackMiddleware
 from .memory import LongTermMemory, MemoryConfig
+from .middleware import AgentMiddleware, default_middleware
 from .runtime import AgentRuntime
 from .skills import Skill, SkillLoader, SkillRegistry
 from .strategy import AgentStrategy, ReActStrategy
@@ -104,9 +104,13 @@ def create_agent(
         if sum(item.definition.name == agent.definition.name for item in subagents) > 1
     }
     if duplicate_subagents:
-        raise ValueError(f"Duplicate subagent names: {', '.join(sorted(duplicate_subagents))}")
+        raise ValueError(
+            f"Duplicate subagent names: {', '.join(sorted(duplicate_subagents))}"
+        )
     tools = (*tuple(tools or ()), *(agent.as_tool() for agent in subagents))
-    duplicate_tools = {tool.name for tool in tools if sum(t.name == tool.name for t in tools) > 1}
+    duplicate_tools = {
+        tool.name for tool in tools if sum(t.name == tool.name for t in tools) > 1
+    }
     if duplicate_tools:
         raise ValueError(f"Duplicate tool names: {', '.join(sorted(duplicate_tools))}")
 
@@ -131,9 +135,13 @@ def create_agent(
         memory_config = None
     else:
         raise TypeError("memory must be MemoryConfig, True, or None")
-    resolved_store = store if store is not None else (InMemoryStore() if memory_config else None)
+    resolved_store = (
+        store if store is not None else (InMemoryStore() if memory_config else None)
+    )
     memory_runtime = (
-        LongTermMemory(resolved_store, memory_config, resolved_model) if memory_config else None
+        LongTermMemory(resolved_store, memory_config, resolved_model)
+        if memory_config
+        else None
     )
 
     definition = AgentDefinition(

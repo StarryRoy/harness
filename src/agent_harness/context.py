@@ -28,7 +28,9 @@ class ContextPolicy:
         if self.summary_token_threshold < 256:
             raise ValueError("summary_token_threshold must be at least 256")
         if not 1 <= self.summary_keep_recent < self.summary_threshold:
-            raise ValueError("summary_keep_recent must be between 1 and summary_threshold - 1")
+            raise ValueError(
+                "summary_keep_recent must be between 1 and summary_threshold - 1"
+            )
         if self.max_tool_results < 0 or self.max_tool_result_chars < 1:
             raise ValueError("tool context limits are invalid")
         if self.max_skill_candidates < 1 or self.skill_retention_turns < 0:
@@ -51,8 +53,12 @@ class AgentContextManager:
             query = value
         else:
             messages = value.get("messages", [])
-            query = " ".join(str(getattr(item, "content", item)) for item in messages[-3:])
-        return list(self.skills.summaries(query=query, limit=self.policy.max_skill_candidates))
+            query = " ".join(
+                str(getattr(item, "content", item)) for item in messages[-3:]
+            )
+        return list(
+            self.skills.summaries(query=query, limit=self.policy.max_skill_candidates)
+        )
 
     def prepare_turn(self, state: Mapping[str, Any]) -> dict[str, Any]:
         turn = int(state.get("session_turn", 0)) + 1
@@ -92,7 +98,9 @@ class AgentContextManager:
             sections.append("Relevant cross-session memories:\n" + rendered)
         available = state.get("available_skills", [])
         if available:
-            catalog = "\n".join(f"- {item['name']}: {item['description']}" for item in available)
+            catalog = "\n".join(
+                f"- {item['name']}: {item['description']}" for item in available
+            )
             sections.append(
                 "Candidate skills are shown as summaries only. Call load_skill before using one:\n"
                 + catalog
@@ -100,15 +108,23 @@ class AgentContextManager:
         for identifier in state.get("loaded_skills", []):
             sections.append(self.skills.get(identifier).context())
         if business_context:
-            rendered = "\n".join(f"- {key}: {value}" for key, value in business_context.items())
+            rendered = "\n".join(
+                f"- {key}: {value}" for key, value in business_context.items()
+            )
             sections.append("Business runtime context:\n" + rendered)
         source = state.get("summarized_messages") or state.get("messages", [])
         messages = self._bounded_tool_results(list(source))
         return [SystemMessage(content="\n\n".join(filter(None, sections))), *messages]
 
     def _bounded_tool_results(self, messages: list[Any]) -> list[Any]:
-        tool_positions = [i for i, item in enumerate(messages) if isinstance(item, ToolMessage)]
-        retained = set(tool_positions[-self.policy.max_tool_results :]) if self.policy.max_tool_results else set()
+        tool_positions = [
+            i for i, item in enumerate(messages) if isinstance(item, ToolMessage)
+        ]
+        retained = (
+            set(tool_positions[-self.policy.max_tool_results :])
+            if self.policy.max_tool_results
+            else set()
+        )
         bounded: list[Any] = []
         for index, item in enumerate(messages):
             if not isinstance(item, ToolMessage):
@@ -118,7 +134,10 @@ class AgentContextManager:
             if index not in retained:
                 content = "[older tool result omitted from model context]"
             elif len(content) > self.policy.max_tool_result_chars:
-                content = content[: self.policy.max_tool_result_chars] + "\n[tool result truncated]"
+                content = (
+                    content[: self.policy.max_tool_result_chars]
+                    + "\n[tool result truncated]"
+                )
             bounded.append(
                 ToolMessage(
                     content=content,
@@ -134,5 +153,6 @@ class AgentContextManager:
         messages = list(state.get("messages", []))
         return (
             len(messages) >= self.policy.summary_threshold
-            or count_tokens_approximately(messages) >= self.policy.summary_token_threshold
+            or count_tokens_approximately(messages)
+            >= self.policy.summary_token_threshold
         )

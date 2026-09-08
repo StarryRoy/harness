@@ -22,7 +22,9 @@ class MemoryConfig:
 class LongTermMemory:
     """Thin integration boundary; extraction/update semantics remain in LangMem."""
 
-    def __init__(self, store: BaseStore, config: MemoryConfig, default_model: Any) -> None:
+    def __init__(
+        self, store: BaseStore, config: MemoryConfig, default_model: Any
+    ) -> None:
         self.store, self.config = store, config
         try:
             from langmem import create_memory_store_manager
@@ -40,9 +42,13 @@ class LongTermMemory:
         if config.schema is not None:
             kwargs["schemas"] = [config.schema]
         try:
-            self.manager = create_memory_store_manager(config.model or default_model, **kwargs)
+            self.manager = create_memory_store_manager(
+                config.model or default_model, **kwargs
+            )
         except Exception as exc:
-            raise MemoryError("Unable to configure LangMem memory manager", cause=exc) from exc
+            raise MemoryError(
+                "Unable to configure LangMem memory manager", cause=exc
+            ) from exc
 
     @staticmethod
     def _runnable_config(agent: str, memory_id: str) -> dict[str, dict[str, str]]:

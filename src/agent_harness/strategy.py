@@ -10,8 +10,8 @@ from typing import Any, Literal, TypedDict
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool, StructuredTool
-from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphInterrupt
+from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from .context import AgentContextManager
@@ -68,7 +68,9 @@ class _ExecutionStrategySupport:
             )
         all_tools: list[BaseTool] = [*definition.tools, *internal_tools]
         executable = {tool.name: tool for tool in all_tools}
-        model = definition.model.bind_tools(all_tools) if all_tools else definition.model
+        model = (
+            definition.model.bind_tools(all_tools) if all_tools else definition.model
+        )
 
         def prompt(state: Mapping[str, Any]) -> list[Any]:
             execution = middleware.current_execution()
@@ -82,7 +84,9 @@ class _ExecutionStrategySupport:
                     "step result when complete."
                 )
                 if plan.get("status") == "synthesizing":
-                    directive = "Synthesize the completed plan results into the final answer."
+                    directive = (
+                        "Synthesize the completed plan results into the final answer."
+                    )
                 elif current < len(steps):
                     directive += f"\nCurrent step: {steps[current]['description']}"
                 messages.insert(1, SystemMessage(content=directive))
@@ -102,15 +106,24 @@ class _ExecutionStrategySupport:
             purpose: str,
         ) -> Any:
             request = ModelRequest(
-                middleware.current_execution(), state, messages, config, purpose=purpose,
+                middleware.current_execution(),
+                state,
+                messages,
+                config,
+                purpose=purpose,
                 tools=tuple(all_tools) if purpose == "agent" else (),
                 response_format=(
-                    _PlanOutput if purpose in {"planner", "replanner"}
-                    else definition.response_format if purpose == "format" else None
+                    _PlanOutput
+                    if purpose in {"planner", "replanner"}
+                    else definition.response_format
+                    if purpose == "format"
+                    else None
                 ),
             )
             try:
-                return middleware.model(request, lambda req: target.invoke(req.messages, req.config))
+                return middleware.model(
+                    request, lambda req: target.invoke(req.messages, req.config)
+                )
             except AgentError:
                 raise
             except Exception as exc:
@@ -124,11 +137,18 @@ class _ExecutionStrategySupport:
             purpose: str,
         ) -> Any:
             request = ModelRequest(
-                middleware.current_execution(), state, messages, config, purpose=purpose,
+                middleware.current_execution(),
+                state,
+                messages,
+                config,
+                purpose=purpose,
                 tools=tuple(all_tools) if purpose == "agent" else (),
                 response_format=(
-                    _PlanOutput if purpose in {"planner", "replanner"}
-                    else definition.response_format if purpose == "format" else None
+                    _PlanOutput
+                    if purpose in {"planner", "replanner"}
+                    else definition.response_format
+                    if purpose == "format"
+                    else None
                 ),
             )
             try:
@@ -138,9 +158,13 @@ class _ExecutionStrategySupport:
             except AgentError:
                 raise
             except Exception as exc:
-                raise ModelError(f"Async model call failed ({purpose})", cause=exc) from exc
+                raise ModelError(
+                    f"Async model call failed ({purpose})", cause=exc
+                ) from exc
 
-        def model_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+        def model_node(
+            state: Mapping[str, Any], config: RunnableConfig
+        ) -> dict[str, Any]:
             iteration = int(state.get("iteration", 0)) + 1
             debug.emit("MODEL CALL", iteration=iteration)
             response = call_model(model, state, config, prompt(state), "agent")
@@ -155,34 +179,115 @@ class _ExecutionStrategySupport:
             return {"messages": [response], "iteration": iteration}
 
         try:
-            from langmem.short_term import SummarizationNode
             from langchain_core.messages.utils import count_tokens_approximately
+            from langmem.short_term import asummarize_messages, summarize_messages
         except ImportError as exc:
             from .errors import MemoryError
+
             raise MemoryError(
                 "Short-term summarization requires the 'langmem' package", cause=exc
             ) from exc
-        summarizer = SummarizationNode(
-            token_counter=count_tokens_approximately,
-            model=definition.model,
-            max_tokens=context.policy.summary_token_threshold
-            + max(context.policy.summary_keep_recent * 256, 512),
-            max_tokens_before_summary=context.policy.summary_token_threshold,
-            max_summary_tokens=max(context.policy.summary_keep_recent * 64, 128),
-        )
 
-        def route(state: Mapping[str, Any]) -> Literal["tools", "replan", "advance", "finalize", "format", "done"]:
+        summary_max_tokens = context.policy.summary_token_threshold + max(
+            context.policy.summary_keep_recent * 256, 512
+        )
+        summary_max_summary_tokens = max(context.policy.summary_keep_recent * 64, 128)
+
+        def summary_input(
+            state: Mapping[str, Any],
+        ) -> tuple[list[Any], dict[str, Any], Any, int]:
+            messages = list(state.get("messages", []))
+            summary_context = dict(state.get("context", {}))
+            running_summary = summary_context.get("running_summary")
+            unsummarized_start = 0
+            last_summarized_id = getattr(
+                running_summary, "last_summarized_message_id", None
+            )
+            if last_summarized_id is not None:
+                for index, message in enumerate(messages):
+                    if message.id == last_summarized_id:
+                        unsummarized_start = index + 1
+                        break
+            unsummarized = messages[unsummarized_start:]
+            threshold = context.policy.summary_token_threshold
+            if (
+                count_tokens_approximately(unsummarized) < threshold
+                and len(unsummarized) >= context.policy.summary_threshold
+            ):
+                old_messages = unsummarized[: -context.policy.summary_keep_recent]
+                threshold = max(
+                    1,
+                    sum(
+                        count_tokens_approximately([message])
+                        for message in old_messages
+                    ),
+                )
+            return messages, summary_context, running_summary, threshold
+
+        def summary_update(
+            result: Any, summary_context: dict[str, Any]
+        ) -> dict[str, Any]:
+            update = {"summarized_messages": result.messages}
+            if result.running_summary is not None:
+                update["summary"] = result.running_summary.summary
+                update["context"] = {
+                    **summary_context,
+                    "running_summary": result.running_summary,
+                }
+            return update
+
+        def summarize_node(state: Mapping[str, Any]) -> dict[str, Any]:
+            messages, summary_context, running_summary, threshold = summary_input(state)
+            result = summarize_messages(
+                messages,
+                running_summary=running_summary,
+                model=definition.model,
+                max_tokens=summary_max_tokens,
+                max_tokens_before_summary=threshold,
+                max_summary_tokens=summary_max_summary_tokens,
+                token_counter=count_tokens_approximately,
+            )
+            return summary_update(result, summary_context)
+
+        async def async_summarize_node(
+            state: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            messages, summary_context, running_summary, threshold = summary_input(state)
+            result = await asummarize_messages(
+                messages,
+                running_summary=running_summary,
+                model=definition.model,
+                max_tokens=summary_max_tokens,
+                max_tokens_before_summary=threshold,
+                max_summary_tokens=summary_max_summary_tokens,
+                token_counter=count_tokens_approximately,
+            )
+            return summary_update(result, summary_context)
+
+        def route(
+            state: Mapping[str, Any],
+        ) -> Literal["tools", "replan", "advance", "finalize", "format", "done"]:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
-                if int(state.get("iteration", 0)) >= definition.runtime_config.max_iterations:
+                if (
+                    int(state.get("iteration", 0))
+                    >= definition.runtime_config.max_iterations
+                ):
                     raise RuntimeError(
                         f"Agent exceeded max_iterations={definition.runtime_config.max_iterations}"
                     )
                 return "tools"
-            if planning and state.get("plan", {}).get("status") not in {"synthesizing", "completed"}:
+            if planning and state.get("plan", {}).get("status") not in {
+                "synthesizing",
+                "completed",
+            }:
                 plan = state["plan"]
                 content = str(getattr(message, "content", "")).strip().lower()
-                inadequate = bool(state.get("step_failed")) or not content or content.startswith("error:")
+                inadequate = (
+                    bool(state.get("step_failed"))
+                    or not content
+                    or content.startswith("error:")
+                )
                 if inadequate and int(plan.get("replan_count", 0)) < self.max_replans:
                     return "replan"
                 return "advance"
@@ -204,7 +309,9 @@ class _ExecutionStrategySupport:
             debug.emit("PLAN STEP", current_step=index, status=plan["status"])
             return {"plan": plan, "step_failed": False}
 
-        def tool_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+        def tool_node(
+            state: Mapping[str, Any], config: RunnableConfig
+        ) -> dict[str, Any]:
             return self._execute_tools(
                 state,
                 executable,
@@ -232,10 +339,13 @@ class _ExecutionStrategySupport:
 
         graph = StateGraph(compose_state_schema(definition.state_schema))
         graph.add_node("prepare", prepare_node)
-        graph.add_node("summarize", summarizer)
+        graph.add_node(
+            "summarize", RunnableLambda(summarize_node, async_summarize_node)
+        )
         graph.add_node("model", RunnableLambda(model_node, async_model_node))
         graph.add_node("tools", RunnableLambda(tool_node, async_tool_node))
         if planning:
+
             def finalize_node(state: Mapping[str, Any]) -> dict[str, Any]:
                 plan = dict(state["plan"])
                 plan["status"] = "completed"
@@ -245,20 +355,43 @@ class _ExecutionStrategySupport:
         if planning:
             planner = definition.model.with_structured_output(_PlanOutput)
 
-            def plan_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            def plan_node(
+                state: Mapping[str, Any], config: RunnableConfig
+            ) -> dict[str, Any]:
                 request = [
-                    *context.build_messages(state, middleware.current_execution().business_context),
-                    AIMessage(content=f"Create a plan of at most {self.max_steps} concrete steps."),
+                    *context.build_messages(
+                        state, middleware.current_execution().business_context
+                    ),
+                    AIMessage(
+                        content=f"Create a plan of at most {self.max_steps} concrete steps."
+                    ),
                 ]
                 value = call_model(planner, state, config, request, "planner")
-                raw_steps = value.get("steps", []) if isinstance(value, Mapping) else value.steps
-                descriptions = [s.get("description", str(s)) if isinstance(s, Mapping) else str(s) for s in raw_steps]
+                raw_steps = (
+                    value.get("steps", [])
+                    if isinstance(value, Mapping)
+                    else value.steps
+                )
+                descriptions = [
+                    s.get("description", str(s)) if isinstance(s, Mapping) else str(s)
+                    for s in raw_steps
+                ]
                 if not descriptions or len(descriptions) > self.max_steps:
                     raise ValueError(f"Planner must return 1..{self.max_steps} steps")
-                plan = {"steps": [{"step_id": str(i + 1), "description": item,
-                                    "status": "pending", "result": None}
-                                  for i, item in enumerate(descriptions)],
-                        "current_step": 0, "status": "executing", "replan_count": 0}
+                plan = {
+                    "steps": [
+                        {
+                            "step_id": str(i + 1),
+                            "description": item,
+                            "status": "pending",
+                            "result": None,
+                        }
+                        for i, item in enumerate(descriptions)
+                    ],
+                    "current_step": 0,
+                    "status": "executing",
+                    "replan_count": 0,
+                }
                 debug.emit("PLAN", plan=plan)
                 return {"plan": plan}
 
@@ -268,29 +401,58 @@ class _ExecutionStrategySupport:
             graph.add_node("advance", advance_node)
             graph.add_edge("advance", "model")
 
-            def replan_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            def replan_node(
+                state: Mapping[str, Any], config: RunnableConfig
+            ) -> dict[str, Any]:
                 plan = dict(state["plan"])
-                completed = [dict(step) for step in plan["steps"][: int(plan["current_step"])]]
+                completed = [
+                    dict(step) for step in plan["steps"][: int(plan["current_step"])]
+                ]
                 remaining_limit = self.max_steps - len(completed)
                 request = [
-                    *context.build_messages(state, middleware.current_execution().business_context),
-                    AIMessage(content=(
-                        "Revise only the unfinished portion of the plan. Preserve completed work. "
-                        f"Return 1..{remaining_limit} remaining concrete steps. "
-                        f"Completed steps and results: {completed}. Failed step: "
-                        f"{plan['steps'][int(plan['current_step'])]}."
-                    )),
+                    *context.build_messages(
+                        state, middleware.current_execution().business_context
+                    ),
+                    AIMessage(
+                        content=(
+                            "Revise only the unfinished portion of the plan. Preserve completed work. "
+                            f"Return 1..{remaining_limit} remaining concrete steps. "
+                            f"Completed steps and results: {completed}. Failed step: "
+                            f"{plan['steps'][int(plan['current_step'])]}."
+                        )
+                    ),
                 ]
                 value = call_model(planner, state, config, request, "replanner")
-                raw = value.get("steps", []) if isinstance(value, Mapping) else value.steps
-                descriptions = [item.get("description", str(item)) if isinstance(item, Mapping) else str(item) for item in raw]
+                raw = (
+                    value.get("steps", [])
+                    if isinstance(value, Mapping)
+                    else value.steps
+                )
+                descriptions = [
+                    item.get("description", str(item))
+                    if isinstance(item, Mapping)
+                    else str(item)
+                    for item in raw
+                ]
                 if not descriptions or len(descriptions) > remaining_limit:
-                    raise ValueError(f"Re-planner must return 1..{remaining_limit} steps")
-                remaining = [{"step_id": str(len(completed) + i + 1), "description": item,
-                              "status": "pending", "result": None}
-                             for i, item in enumerate(descriptions)]
-                plan.update(steps=[*completed, *remaining], current_step=len(completed),
-                            status="executing", replan_count=int(plan["replan_count"]) + 1)
+                    raise ValueError(
+                        f"Re-planner must return 1..{remaining_limit} steps"
+                    )
+                remaining = [
+                    {
+                        "step_id": str(len(completed) + i + 1),
+                        "description": item,
+                        "status": "pending",
+                        "result": None,
+                    }
+                    for i, item in enumerate(descriptions)
+                ]
+                plan.update(
+                    steps=[*completed, *remaining],
+                    current_step=len(completed),
+                    status="executing",
+                    replan_count=int(plan["replan_count"]) + 1,
+                )
                 debug.emit("REPLAN", plan=plan, replan_count=plan["replan_count"])
                 return {"plan": plan, "step_failed": False}
 
@@ -312,25 +474,32 @@ class _ExecutionStrategySupport:
         graph.add_conditional_edges("model", route, destinations)
         graph.add_edge("tools", "model")
         if planning:
-            graph.add_edge("finalize", "format" if definition.response_format is not None else END)
+            graph.add_edge(
+                "finalize", "format" if definition.response_format is not None else END
+            )
 
         if definition.response_format is not None:
-            formatter = definition.model.with_structured_output(definition.response_format)
+            formatter = definition.model.with_structured_output(
+                definition.response_format
+            )
 
-            def format_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            def format_node(
+                state: Mapping[str, Any], config: RunnableConfig
+            ) -> dict[str, Any]:
                 result = call_model(formatter, state, config, prompt(state), "format")
                 return {"structured_response": result}
 
             async def async_format_node(
                 state: Mapping[str, Any], config: RunnableConfig
             ) -> dict[str, Any]:
-                result = await acall_model(formatter, state, config, prompt(state), "format")
+                result = await acall_model(
+                    formatter, state, config, prompt(state), "format"
+                )
                 return {"structured_response": result}
 
             graph.add_node("format", RunnableLambda(format_node, async_format_node))
             graph.add_edge("format", END)
         return graph.compile(checkpointer=checkpointer)
-
 
     @staticmethod
     def _skill_tools(
@@ -345,7 +514,11 @@ class _ExecutionStrategySupport:
         def load_skill(name: str) -> str:
             """Load a candidate skill and all of its dependencies into agent context."""
             ordered = registry.load_order(name, tool_names)
-            debug.emit("SKILL LOAD", name=name, dependencies=[item.identifier for item in ordered[:-1]])
+            debug.emit(
+                "SKILL LOAD",
+                name=name,
+                dependencies=[item.identifier for item in ordered[:-1]],
+            )
             return "Loaded skills: " + ", ".join(item.identifier for item in ordered)
 
         def unload_skill(name: str) -> str:
@@ -375,19 +548,29 @@ class _ExecutionStrategySupport:
         ]
         if any(skill.references for skill in registry.list()):
             tools.append(
-                StructuredTool.from_function(read_skill_reference, name="read_skill_reference")
+                StructuredTool.from_function(
+                    read_skill_reference, name="read_skill_reference"
+                )
             )
         if any(skill.resources for skill in registry.list()):
             tools.append(
-                StructuredTool.from_function(read_skill_resource, name="read_skill_resource")
+                StructuredTool.from_function(
+                    read_skill_resource, name="read_skill_resource"
+                )
             )
         if any(skill.script_files for skill in registry.list()):
-            tools.append(StructuredTool.from_function(run_skill_script, name="run_skill_script"))
+            tools.append(
+                StructuredTool.from_function(run_skill_script, name="run_skill_script")
+            )
         return tools
 
     @staticmethod
     def _result(call: dict[str, Any], value: Any) -> ToolMessage:
-        content = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
+        content = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, default=str, ensure_ascii=False)
+        )
         return ToolMessage(content=content, tool_call_id=call["id"], name=call["name"])
 
     @staticmethod
@@ -403,7 +586,9 @@ class _ExecutionStrategySupport:
         reference = call["args"].get("skill")
         identifier = registry.get(reference).identifier
         if identifier not in loaded:
-            raise SkillError(f"Skill '{identifier}' must be loaded before using its assets")
+            raise SkillError(
+                f"Skill '{identifier}' must be loaded before using its assets"
+            )
 
     @staticmethod
     def _skill_state_after(
@@ -465,9 +650,13 @@ class _ExecutionStrategySupport:
             if call["name"] not in tools:
                 raise ToolError(f"Model requested unknown tool: {call['name']}")
             if call["name"] in subagent_names:
-                debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
+                debug.emit(
+                    "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
+                )
             debug.emit("TOOL CALL", name=call["name"])
-            if "mcp" in type(tools[call["name"]]).__module__.lower() or (tools[call["name"]].metadata or {}).get("mcp"):
+            if "mcp" in type(tools[call["name"]]).__module__.lower() or (
+                tools[call["name"]].metadata or {}
+            ).get("mcp"):
                 debug.emit("MCP TOOL", name=call["name"])
             succeeded = False
             try:
@@ -532,9 +721,13 @@ class _ExecutionStrategySupport:
             if call["name"] not in tools:
                 raise ToolError(f"Model requested unknown tool: {call['name']}")
             if call["name"] in subagent_names:
-                debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
+                debug.emit(
+                    "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
+                )
             debug.emit("TOOL CALL", name=call["name"])
-            if "mcp" in type(tools[call["name"]]).__module__.lower() or (tools[call["name"]].metadata or {}).get("mcp"):
+            if "mcp" in type(tools[call["name"]]).__module__.lower() or (
+                tools[call["name"]].metadata or {}
+            ).get("mcp"):
                 debug.emit("MCP TOOL", name=call["name"])
             succeeded = False
             try:
@@ -579,7 +772,9 @@ class _ExecutionStrategySupport:
         }
 
     @staticmethod
-    def _approved_arguments(tool: BaseTool, call: Mapping[str, Any], debug: DebugHandler) -> dict[str, Any]:
+    def _approved_arguments(
+        tool: BaseTool, call: Mapping[str, Any], debug: DebugHandler
+    ) -> dict[str, Any]:
         metadata = tool.metadata or {}
         if not metadata.get("harness_approval"):
             return dict(call["args"])
