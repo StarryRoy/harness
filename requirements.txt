@@ -1,7 +1,10 @@
 # Agent Harness 运行时依赖
 langchain-core>=0.3.30,<2
 langgraph>=0.2.60,<2
+langmem>=0.0.29,<1
 PyYAML>=6.0,<7
+# Optional Phase 3 integrations (install with `pip install -e .[enterprise]`)
+# langchain-mcp-adapters>=0.1,<1
 
 # 本地开发与测试依赖
 pytest>=8.0,<9

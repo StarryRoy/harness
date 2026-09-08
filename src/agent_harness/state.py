@@ -15,8 +15,10 @@ class AgentState(TypedDict, total=False):
     active_skill: str | None
     skill_state: dict[str, dict[str, Any]]
     session_turn: int
-    summary: str
+    context: dict[str, Any]
     structured_response: Any
+    plan: dict[str, Any]
+    long_term_memories: list[dict[str, Any]]
 
 
 HARNESS_STATE_FIELDS = frozenset(AgentState.__annotations__)

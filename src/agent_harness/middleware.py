@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import AgentError, MiddlewareError
+
 
 @dataclass(slots=True)
 class AgentExecution:
@@ -29,6 +31,7 @@ class ModelRequest:
     messages: list[Any]
     config: Mapping[str, Any]
     purpose: str = "agent"
+    model_adapter: Callable[[Any], Any] | None = None
 
 
 @dataclass(slots=True)
@@ -254,12 +257,32 @@ class MiddlewarePipeline:
     def before_agent(self, execution: AgentExecution) -> None:
         for item in self.middleware:
             self.debug.emit("MIDDLEWARE", hook="before_agent", name=type(item).__name__)
-            item.before_agent(execution)
+            try:
+                item.before_agent(execution)
+            except Exception as exc:
+                if isinstance(exc, AgentError):
+                    raise
+                raise MiddlewareError(
+                    f"{type(item).__name__}.before_agent failed", cause=exc
+                ) from exc
+            guardrail = execution.metadata.pop("guardrail", None)
+            if guardrail:
+                self.debug.emit("GUARDRAIL", stage=guardrail)
 
     async def abefore_agent(self, execution: AgentExecution) -> None:
         for item in self.middleware:
             self.debug.emit("MIDDLEWARE", hook="before_agent", name=type(item).__name__)
-            await item.abefore_agent(execution)
+            try:
+                await item.abefore_agent(execution)
+            except Exception as exc:
+                if isinstance(exc, AgentError):
+                    raise
+                raise MiddlewareError(
+                    f"{type(item).__name__}.before_agent failed", cause=exc
+                ) from exc
+            guardrail = execution.metadata.pop("guardrail", None)
+            if guardrail:
+                self.debug.emit("GUARDRAIL", stage=guardrail)
 
     def model(self, request: ModelRequest, handler: ModelHandler) -> Any:
         for item in self.middleware:
@@ -270,6 +293,9 @@ class MiddlewarePipeline:
             next_call = call
             call = lambda req, mw=item, nxt=next_call: mw.wrap_model_call(req, nxt)
         response = call(request)
+        fallback = request.execution.metadata.pop("model_fallback", None)
+        if fallback:
+            self.debug.emit("MODEL FALLBACK", model=fallback, purpose=request.purpose)
         for item in reversed(self.middleware):
             updated = item.after_model(request, response)
             response = response if updated is None else updated
@@ -288,6 +314,9 @@ class MiddlewarePipeline:
 
             call = wrapped
         response = await call(request)
+        fallback = request.execution.metadata.pop("model_fallback", None)
+        if fallback:
+            self.debug.emit("MODEL FALLBACK", model=fallback, purpose=request.purpose)
         for item in reversed(self.middleware):
             updated = await item.aafter_model(request, response)
             response = response if updated is None else updated
@@ -298,7 +327,11 @@ class MiddlewarePipeline:
         for item in reversed(self.middleware):
             next_call = call
             call = lambda req, mw=item, nxt=next_call: mw.wrap_tool_call(req, nxt)
-        return call(request)
+        result = call(request)
+        guardrail = request.execution.metadata.pop("guardrail", None)
+        if guardrail:
+            self.debug.emit("GUARDRAIL", stage=guardrail, tool=request.tool.name)
+        return result
 
     async def atool(self, request: ToolRequest, handler: AsyncToolHandler) -> Any:
         call = handler
@@ -309,20 +342,44 @@ class MiddlewarePipeline:
                 return await mw.awrap_tool_call(req, nxt)
 
             call = wrapped
-        return await call(request)
+        result = await call(request)
+        guardrail = request.execution.metadata.pop("guardrail", None)
+        if guardrail:
+            self.debug.emit("GUARDRAIL", stage=guardrail, tool=request.tool.name)
+        return result
 
     def after_agent(self, execution: AgentExecution, result: Any) -> Any:
         for item in reversed(self.middleware):
             self.debug.emit("MIDDLEWARE", hook="after_agent", name=type(item).__name__)
-            updated = item.after_agent(execution, result)
+            try:
+                updated = item.after_agent(execution, result)
+            except Exception as exc:
+                if isinstance(exc, AgentError):
+                    raise
+                raise MiddlewareError(
+                    f"{type(item).__name__}.after_agent failed", cause=exc
+                ) from exc
             result = result if updated is None else updated
+            guardrail = execution.metadata.pop("guardrail", None)
+            if guardrail:
+                self.debug.emit("GUARDRAIL", stage=guardrail)
         return result
 
     async def aafter_agent(self, execution: AgentExecution, result: Any) -> Any:
         for item in reversed(self.middleware):
             self.debug.emit("MIDDLEWARE", hook="after_agent", name=type(item).__name__)
-            updated = await item.aafter_agent(execution, result)
+            try:
+                updated = await item.aafter_agent(execution, result)
+            except Exception as exc:
+                if isinstance(exc, AgentError):
+                    raise
+                raise MiddlewareError(
+                    f"{type(item).__name__}.after_agent failed", cause=exc
+                ) from exc
             result = result if updated is None else updated
+            guardrail = execution.metadata.pop("guardrail", None)
+            if guardrail:
+                self.debug.emit("GUARDRAIL", stage=guardrail)
         return result
 
 

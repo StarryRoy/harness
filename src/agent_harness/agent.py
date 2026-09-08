@@ -42,9 +42,10 @@ class Agent:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
     ) -> dict[str, Any]:
         return self.runtime.invoke(
-            value, config, session_id=session_id, context=context
+            value, config, session_id=session_id, context=context, memory_id=memory_id
         )
 
     async def ainvoke(
@@ -54,9 +55,10 @@ class Agent:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.runtime.ainvoke(
-            value, config, session_id=session_id, context=context
+            value, config, session_id=session_id, context=context, memory_id=memory_id
         )
 
     def stream(
@@ -66,10 +68,11 @@ class Agent:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
         **kwargs: Any,
     ) -> Iterator[Any]:
         return self.runtime.stream(
-            value, config, session_id=session_id, context=context, **kwargs
+            value, config, session_id=session_id, context=context, memory_id=memory_id, **kwargs
         )
 
     def astream(
@@ -79,11 +82,21 @@ class Agent:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
         return self.runtime.astream(
-            value, config, session_id=session_id, context=context, **kwargs
+            value, config, session_id=session_id, context=context, memory_id=memory_id, **kwargs
         )
+
+    def resume(self, *, session_id: str, decision: str | Mapping[str, Any]) -> dict[str, Any]:
+        """Resume a paused sensitive tool call with approve/reject/edit."""
+        return self.runtime.resume(session_id=session_id, decision=decision)
+
+    async def aresume(
+        self, *, session_id: str, decision: str | Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return await self.runtime.aresume(session_id=session_id, decision=decision)
 
     def as_tool(
         self, *, name: str | None = None, description: str | None = None
