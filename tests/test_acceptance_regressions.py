@@ -409,6 +409,139 @@ def test_main_resume_continues_sensitive_subagent(planning):
         assert result["plan"]["status"] == "completed"
 
 
+@pytest.mark.parametrize(
+    ("async_mode", "second_decision", "expected_second_calls"),
+    [
+        (False, "approve", ["B"]),
+        (True, "approve", ["B"]),
+        (False, "reject", []),
+    ],
+)
+def test_subagent_continues_through_multiple_hitl_decisions(
+    async_mode, second_decision, expected_second_calls
+):
+    first_calls = []
+    second_calls = []
+    child_name = f"sequential_child_{async_mode}_{second_decision}"
+
+    def sensitive_a(value: str) -> str:
+        first_calls.append(value)
+        return f"A:{value}"
+
+    def sensitive_b(value: str) -> str:
+        second_calls.append(value)
+        return f"B:{value}"
+
+    child = create_agent(
+        name=child_name,
+        description="Runs two approved actions.",
+        instructions="Run each required sensitive action in order.",
+        model=RecordingModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[tool_call("sensitive_a", {"value": "A"}, "child-a")],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[tool_call("sensitive_b", {"value": "B"}, "child-b")],
+                ),
+                AIMessage(content="child final"),
+            ]
+        ),
+        tools=[
+            require_approval(
+                StructuredTool.from_function(
+                    sensitive_a,
+                    name="sensitive_a",
+                    description="First sensitive action.",
+                )
+            ),
+            require_approval(
+                StructuredTool.from_function(
+                    sensitive_b,
+                    name="sensitive_b",
+                    description="Second sensitive action.",
+                )
+            ),
+        ],
+    )
+    main = create_agent(
+        name=f"sequential_main_{async_mode}_{second_decision}",
+        instructions="Delegate and return the final result.",
+        model=RecordingModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(child_name, {"task": "run both"}, "delegate")
+                    ],
+                ),
+                AIMessage(content="main final"),
+            ]
+        ),
+        subagents=[child],
+    )
+
+    async def run_async():
+        await main.ainvoke("goal", session_id="main-session")
+        assert first_calls == []
+        await main.aresume(session_id="main-session", decision="approve")
+        assert main.runtime.is_paused(session_id="main-session")
+        assert first_calls == ["A"]
+        assert second_calls == []
+        return await main.aresume(session_id="main-session", decision=second_decision)
+
+    if async_mode:
+        result = asyncio.run(run_async())
+    else:
+        main.invoke("goal", session_id="main-session")
+        assert first_calls == []
+        main.resume(session_id="main-session", decision="approve")
+        assert main.runtime.is_paused(session_id="main-session")
+        assert first_calls == ["A"]
+        assert second_calls == []
+        result = main.resume(session_id="main-session", decision=second_decision)
+
+    assert first_calls == ["A"]
+    assert second_calls == expected_second_calls
+    assert not main.runtime.is_paused(session_id="main-session")
+    assert result["messages"][-1].content == "main final"
+    assert any(
+        isinstance(message, ToolMessage) and "child final" in message.content
+        for message in result["messages"]
+    )
+
+
+def test_plan_execute_with_structured_output_runs_full_graph():
+    expected = {"answer": "formatted plan result"}
+    model = RecordingModel(
+        responses=[
+            AIMessage(content="step result"),
+            AIMessage(content="final synthesis"),
+        ],
+        structured_outputs=[
+            {"steps": [{"description": "execute the only step"}]},
+            expected,
+        ],
+    )
+    agent = create_agent(
+        name="plan-structured-combination",
+        instructions="Plan, execute, synthesize, and format.",
+        model=model,
+        strategy=PlanExecuteStrategy(max_steps=1),
+        response_format=dict,
+    )
+
+    result = agent.invoke("complete the structured task")
+
+    assert result["plan"]["status"] == "completed"
+    assert result["plan"]["steps"][0]["result"] == "step result"
+    assert result["messages"][-1].content == "final synthesis"
+    assert result["structured_response"] == expected
+    assert len(model.structured_seen) == 2
+
+
 class NamespaceMemory:
     def __init__(self):
         self.values = {}

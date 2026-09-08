@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
@@ -382,6 +382,27 @@ class AgentRuntime:
 
     async def ais_paused(self, *, session_id: str) -> bool:
         return bool(await self.apending_interrupts(session_id=session_id))
+
+    def completed_approval_count(self, *, session_id: str) -> int:
+        """Count approval-gated calls already completed in a child session."""
+        config, _, _ = self._config(None, session_id)
+        return self._completed_approval_count(self.graph.get_state(config).values)
+
+    async def acompleted_approval_count(self, *, session_id: str) -> int:
+        config, _, _ = self._config(None, session_id)
+        snapshot = await self.graph.aget_state(config)
+        return self._completed_approval_count(snapshot.values)
+
+    def _completed_approval_count(self, state: Mapping[str, Any]) -> int:
+        approval_tools = {
+            tool.name
+            for tool in self.definition.tools
+            if (tool.metadata or {}).get("harness_approval")
+        }
+        return sum(
+            isinstance(message, ToolMessage) and message.name in approval_tools
+            for message in state.get("messages", [])
+        )
 
     @staticmethod
     def _decision(decision: str | Mapping[str, Any]) -> dict[str, Any]:

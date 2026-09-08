@@ -160,6 +160,29 @@ class Agent:
                 ),
             }
 
+        max_child_interrupts = (
+            self.definition.runtime_config.max_iterations
+            * self.definition.runtime_config.call_limit
+        )
+
+        def replay_parent_interrupts(
+            task: str, child_session: str, completed: int
+        ) -> None:
+            if completed > max_child_interrupts:
+                raise RuntimeError("SubAgent exceeded bounded HITL resume limit")
+            payload = pause_payload(task, child_session)
+            for _ in range(completed):
+                interrupt(payload)
+
+        async def areplay_parent_interrupts(
+            task: str, child_session: str, completed: int
+        ) -> None:
+            if completed > max_child_interrupts:
+                raise RuntimeError("SubAgent exceeded bounded HITL resume limit")
+            payload = await apause_payload(task, child_session)
+            for _ in range(completed):
+                interrupt(payload)
+
         def run(task: str) -> dict[str, Any]:
             """Delegate one explicit task and return only its final business result."""
             self.runtime.debug.emit(
@@ -167,24 +190,36 @@ class Agent:
             )
             try:
                 child_session, memory_id = child_scope()
-                if child_session and self.runtime.is_paused(session_id=child_session):
-                    decision = interrupt(pause_payload(task, child_session))
-                    state = self.resume(
-                        session_id=child_session,
-                        decision=decision,
+                paused_at_entry = bool(
+                    child_session and self.runtime.is_paused(session_id=child_session)
+                )
+                if paused_at_entry:
+                    completed = self.runtime.completed_approval_count(
+                        session_id=child_session
                     )
+                    replay_parent_interrupts(task, child_session, completed)
+                    state = None
                 else:
                     state = self.invoke(
                         task, session_id=child_session, memory_id=memory_id
                     )
-                    if child_session and self.runtime.is_paused(
-                        session_id=child_session
-                    ):
+                    completed = 0
+                if child_session:
+                    for _ in range(completed, max_child_interrupts):
+                        if not self.runtime.is_paused(session_id=child_session):
+                            break
                         decision = interrupt(pause_payload(task, child_session))
                         state = self.resume(
                             session_id=child_session,
                             decision=decision,
                         )
+                    else:
+                        if self.runtime.is_paused(session_id=child_session):
+                            raise RuntimeError(
+                                "SubAgent exceeded bounded HITL resume limit"
+                            )
+                if state is None:
+                    raise RuntimeError("SubAgent did not reach a completed state")
                 result = self._subagent_result(state)
             except GraphInterrupt:
                 raise
@@ -212,26 +247,37 @@ class Agent:
             )
             try:
                 child_session, memory_id = child_scope()
-                if child_session and await self.runtime.ais_paused(
-                    session_id=child_session
-                ):
-                    decision = interrupt(await apause_payload(task, child_session))
-                    state = await self.aresume(
-                        session_id=child_session,
-                        decision=decision,
+                paused_at_entry = bool(
+                    child_session
+                    and await self.runtime.ais_paused(session_id=child_session)
+                )
+                if paused_at_entry:
+                    completed = await self.runtime.acompleted_approval_count(
+                        session_id=child_session
                     )
+                    await areplay_parent_interrupts(task, child_session, completed)
+                    state = None
                 else:
                     state = await self.ainvoke(
                         task, session_id=child_session, memory_id=memory_id
                     )
-                    if child_session and await self.runtime.ais_paused(
-                        session_id=child_session
-                    ):
+                    completed = 0
+                if child_session:
+                    for _ in range(completed, max_child_interrupts):
+                        if not await self.runtime.ais_paused(session_id=child_session):
+                            break
                         decision = interrupt(await apause_payload(task, child_session))
                         state = await self.aresume(
                             session_id=child_session,
                             decision=decision,
                         )
+                    else:
+                        if await self.runtime.ais_paused(session_id=child_session):
+                            raise RuntimeError(
+                                "SubAgent exceeded bounded HITL resume limit"
+                            )
+                if state is None:
+                    raise RuntimeError("SubAgent did not reach a completed state")
                 result = self._subagent_result(state)
             except GraphInterrupt:
                 raise
