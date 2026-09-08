@@ -20,7 +20,7 @@ Context Manager
 Basic Summarization
 ```
 
-**不要推翻已有架构，不要重新用 LangChain `create_agent()` 包一层替换自研 Runtime。**
+**不要推翻已有架构**
 
 本期目标：
 
@@ -36,8 +36,6 @@ Basic Summarization
 2. ReAct 继续保留并作为默认 Strategy。
 3. Plan & Execute 必须通过 Phase 1 已定义的可替换 `AgentStrategy` 接口接入。
 4. Plan & Execute 必须复用现有 Tool、Skill、SubAgent、Middleware、Session、Context，不得重新创建第二套生态。
-5. LangChain 只复用成熟组件。
-6. 不开发具体 RAG、DB、File 等通用工具。
 7. Testing / Eval 平台仍然不开发。
 8. Observability 仍然只需要极简 Debug，不建设正式平台。
 9. 不追求 C 端大规模 SaaS 能力。
@@ -248,35 +246,8 @@ Middleware
 
 本期 HITL 完成后，Plan Step 中如果触发需要审批的 Tool，应正常暂停并 Resume，而不是破坏 Plan State。
 
----
 
-# 四、Structured Output 完善
 
-统一支持：
-
-```python
-agent = create_agent(
-    ...,
-    response_format=MyPydanticModel,
-)
-```
-
-至少支持：
-
-```text
-Pydantic model
-JSON Schema（如果现有模型层容易支持）
-```
-
-实现原则：
-
-1. 优先复用 Provider Native Structured Output。
-2. 其次复用 LangChain 成熟能力。
-3. 不自研复杂 JSON 修复 Framework。
-4. ReAct 和 Plan & Execute 使用同一套 response_format 接口。
-5. SubAgent 也可以定义自己的结构化输出。
-
----
 
 # 五、HITL
 
@@ -586,7 +557,6 @@ Testing / Eval Framework
 复杂 Audit Platform
 复杂 Rate Limit Platform
 大型 MCP 管理平台
-任何 RAG / DB / 文件等具体通用工具开发
 C 端千万级高并发设计
 ```
 
@@ -737,7 +707,3 @@ MCP
 极简 Debug
 统一 Error Model
 ```
-
-这个范围完成后即可停止继续扩框架。
-
-后续任何新增能力都应该由真实业务需求驱动，而不是为了“框架完整度”继续堆功能。
