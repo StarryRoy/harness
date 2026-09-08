@@ -10,14 +10,14 @@ requires-python = ">=3.10"
 dependencies = [
   "langchain-core>=0.3.30,<2",
   "langgraph>=0.2.60,<2",
-  "langmem>=0.0.29,<1",
+  "langmem==0.0.30",
   "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]
 memory = []
 mcp = ["langchain-mcp-adapters>=0.1,<1"]
-enterprise = ["langmem>=0.0.29,<1", "langchain-mcp-adapters>=0.1,<1"]
+enterprise = ["langmem==0.0.30", "langchain-mcp-adapters>=0.1,<1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_harness"]

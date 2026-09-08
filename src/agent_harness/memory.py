@@ -32,6 +32,8 @@ class LongTermMemory:
             ) from exc
         kwargs: dict[str, Any] = {
             "namespace": (config.namespace, "{agent_name}", "{memory_id}"),
+            "store": self.store,
+            "query_limit": config.search_limit,
         }
         if config.instructions is not None:
             kwargs["instructions"] = config.instructions
@@ -42,31 +44,30 @@ class LongTermMemory:
         except Exception as exc:
             raise MemoryError("Unable to configure LangMem memory manager", cause=exc) from exc
 
-    def namespace(self, agent: str, memory_id: str) -> tuple[str, ...]:
-        return (self.config.namespace, agent, memory_id)
+    @staticmethod
+    def _runnable_config(agent: str, memory_id: str) -> dict[str, dict[str, str]]:
+        return {"configurable": {"agent_name": agent, "memory_id": memory_id}}
 
     def load(self, agent: str, memory_id: str, query: str) -> list[dict[str, Any]]:
         try:
-            items = self.store.search(
-                self.namespace(agent, memory_id), query=query, limit=self.config.search_limit
+            items = self.manager.search(
+                query=query, config=self._runnable_config(agent, memory_id)
             )
-            return [dict(item.value) for item in items]
+            return [dict(getattr(item, "value", item)) for item in items]
         except Exception as exc:
             raise MemoryError("Unable to search long-term memory", cause=exc) from exc
 
     def update(self, agent: str, memory_id: str, messages: list[Any]) -> Any:
-        config = {"configurable": {"agent_name": agent, "memory_id": memory_id}}
+        config = self._runnable_config(agent, memory_id)
         try:
             # LangMem owns extraction, deduplication, consolidation and updates.
-            return self.manager.invoke({"messages": messages}, config=config, store=self.store)
+            return self.manager.invoke({"messages": messages}, config=config)
         except Exception as exc:
             raise MemoryError("Unable to update long-term memory", cause=exc) from exc
 
     async def aupdate(self, agent: str, memory_id: str, messages: list[Any]) -> Any:
-        config = {"configurable": {"agent_name": agent, "memory_id": memory_id}}
+        config = self._runnable_config(agent, memory_id)
         try:
-            return await self.manager.ainvoke(
-                {"messages": messages}, config=config, store=self.store
-            )
+            return await self.manager.ainvoke({"messages": messages}, config=config)
         except Exception as exc:
             raise MemoryError("Unable to update long-term memory", cause=exc) from exc

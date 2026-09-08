@@ -145,6 +145,11 @@ agent.invoke("我喜欢简洁报告", session_id="A", memory_id="user-1")
 agent.invoke("按我的偏好写", session_id="B", memory_id="user-1")
 ```
 
+未传入 `store` 时 Harness 使用普通 `InMemoryStore`，适合开发和功能验证。需要语义相似度
+检索时，应由调用方传入已配置 vector index/embedding 的 LangGraph `BaseStore`；Harness
+不会选择或硬编码 embedding provider。长期记忆默认按
+`(namespace, agent_name, memory_id)` 隔离，因此 SubAgent 不会自动共享记忆。
+
 用 `require_approval(tool)` 标记敏感工具。图会通过 LangGraph `interrupt()` 暂停，
 随后调用 `agent.resume(session_id="...", decision="approve")`；也支持 `reject`，或
 `{"decision": "edit", "args": {...}}` 修改参数。计划和步骤结果由 Checkpointer
