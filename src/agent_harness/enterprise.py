@@ -66,7 +66,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
             last = primary
             for model in self.models:
                 try:
-                    return model.invoke(request.messages, request.config)
+                    return request.invoke_with(model)
                 except Exception as exc:
                     last = exc
             raise last from primary
@@ -78,7 +78,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
             last = primary
             for model in self.models:
                 try:
-                    return await model.ainvoke(request.messages, request.config)
+                    return await request.ainvoke_with(model)
                 except Exception as exc:
                     last = exc
             raise last from primary

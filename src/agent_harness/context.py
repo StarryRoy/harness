@@ -1,4 +1,4 @@
-"""Centralized model-context assembly and simple session compaction."""
+"""Centralized model-context assembly around LangMem compaction."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 
 from .skills import SkillRegistry
 
@@ -14,6 +15,7 @@ from .skills import SkillRegistry
 @dataclass(frozen=True, slots=True)
 class ContextPolicy:
     summary_threshold: int = 40
+    summary_token_threshold: int = 6_000
     summary_keep_recent: int = 12
     max_tool_results: int = 8
     max_tool_result_chars: int = 8_000
@@ -23,6 +25,8 @@ class ContextPolicy:
     def __post_init__(self) -> None:
         if self.summary_threshold < 2:
             raise ValueError("summary_threshold must be at least 2")
+        if self.summary_token_threshold < 256:
+            raise ValueError("summary_token_threshold must be at least 256")
         if not 1 <= self.summary_keep_recent < self.summary_threshold:
             raise ValueError("summary_keep_recent must be between 1 and summary_threshold - 1")
         if self.max_tool_results < 0 or self.max_tool_result_chars < 1:
@@ -82,9 +86,6 @@ class AgentContextManager:
         business_context: Mapping[str, Any] | None = None,
     ) -> list[Any]:
         sections = [self.instructions.strip()]
-        summary = state.get("summary")
-        if summary:
-            sections.append(f"Session summary of older messages:\n{summary}")
         memories = state.get("long_term_memories", [])
         if memories:
             rendered = "\n".join(f"- {item}" for item in memories)
@@ -101,7 +102,8 @@ class AgentContextManager:
         if business_context:
             rendered = "\n".join(f"- {key}: {value}" for key, value in business_context.items())
             sections.append("Business runtime context:\n" + rendered)
-        messages = self._bounded_tool_results(list(state.get("messages", [])))
+        source = state.get("summarized_messages") or state.get("messages", [])
+        messages = self._bounded_tool_results(list(source))
         return [SystemMessage(content="\n\n".join(filter(None, sections))), *messages]
 
     def _bounded_tool_results(self, messages: list[Any]) -> list[Any]:
@@ -129,29 +131,8 @@ class AgentContextManager:
         return bounded
 
     def needs_summary(self, state: Mapping[str, Any]) -> bool:
-        return len(state.get("messages", [])) >= self.policy.summary_threshold
-
-    def split_for_summary(self, state: Mapping[str, Any]) -> tuple[list[BaseMessage], list[BaseMessage]]:
         messages = list(state.get("messages", []))
-        split = max(0, len(messages) - self.policy.summary_keep_recent)
-        # Do not retain an orphaned tool response without its AI tool call.
-        while split > 0 and split < len(messages) and isinstance(messages[split], ToolMessage):
-            split -= 1
-        return messages[:split], messages[split:]
-
-    @staticmethod
-    def summary_prompt(previous: str | None, messages: list[BaseMessage]) -> list[Any]:
-        transcript = "\n".join(
-            f"{getattr(message, 'type', type(message).__name__)}: {message.content}"
-            for message in messages
+        return (
+            len(messages) >= self.policy.summary_threshold
+            or count_tokens_approximately(messages) >= self.policy.summary_token_threshold
         )
-        prior = f"Existing summary:\n{previous}\n\n" if previous else ""
-        return [
-            SystemMessage(
-                content=(
-                    "Create a concise factual session summary. Preserve user preferences, decisions, "
-                    "unresolved work, and facts needed in later turns. Do not add facts."
-                )
-            ),
-            SystemMessage(content=prior + "Messages to summarize:\n" + transcript),
-        ]

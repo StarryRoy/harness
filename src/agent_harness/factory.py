@@ -12,7 +12,7 @@ from langgraph.store.memory import InMemoryStore
 
 from .agent import Agent
 from .definition import AgentDefinition, RuntimeConfig
-from .middleware import AgentMiddleware, default_middleware
+from .middleware import AgentMiddleware, RetryMiddleware, default_middleware
 from .enterprise import GuardrailMiddleware, ModelFallbackMiddleware
 from .memory import LongTermMemory, MemoryConfig
 from .runtime import AgentRuntime
@@ -87,14 +87,27 @@ def create_agent(
         call_limit=config.call_limit,
     )
     additions = tuple(item for item in (guardrail,) if item is not None)
-    if fallback:
-        additions += (ModelFallbackMiddleware(fallback),)
     if middleware is None:
         resolved_middleware = (*defaults, *additions)
     elif middleware_mode == "extend":
         resolved_middleware = (*defaults, *middleware, *additions)
     else:
         resolved_middleware = (*middleware, *additions)
+    if fallback:
+        fallback_middleware = ModelFallbackMiddleware(fallback)
+        retry_index = next(
+            (
+                index
+                for index, item in enumerate(resolved_middleware)
+                if isinstance(item, RetryMiddleware)
+            ),
+            len(resolved_middleware),
+        )
+        resolved_middleware = (
+            *resolved_middleware[:retry_index],
+            fallback_middleware,
+            *resolved_middleware[retry_index:],
+        )
 
     subagents = tuple(subagents or ())
     duplicate_subagents = {
