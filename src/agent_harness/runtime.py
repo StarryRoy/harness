@@ -9,11 +9,13 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
 
 from .context import AgentContextManager
 from .debug import DebugHandler
 from .definition import AgentDefinition
 from .middleware import AgentExecution, MiddlewarePipeline
+from .memory import LongTermMemory
 from .skills import SkillRegistry
 from .state import HARNESS_STATE_FIELDS
 from .strategy import AgentStrategy
@@ -28,6 +30,7 @@ class AgentRuntime:
         checkpointer: Any,
         *,
         session_namespace: str | None = None,
+        memory: LongTermMemory | None = None,
     ) -> None:
         self.definition = definition
         self.debug = DebugHandler(
@@ -38,6 +41,7 @@ class AgentRuntime:
             definition.instructions, skills, definition.runtime_config.context_policy
         )
         self.middleware = MiddlewarePipeline(definition.middleware, self.debug)
+        self.memory = memory
         if session_namespace is not None and (
             not isinstance(session_namespace, str) or not session_namespace.strip()
         ):
@@ -93,8 +97,10 @@ class AgentRuntime:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
     ) -> dict[str, Any]:
         state = self._input(value)
+        self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
         execution = AgentExecution(
             self.definition.name, state, public_id, dict(context or {}), {"thread_id": thread_id}
@@ -105,7 +111,9 @@ class AgentRuntime:
             try:
                 self.middleware.before_agent(execution)
                 result = self.graph.invoke(state, graph_config)
-                return self.middleware.after_agent(execution, result)
+                result = self.middleware.after_agent(execution, result)
+                self._update_memory(result, memory_id)
+                return result
             except Exception as exc:
                 execution.error = exc
                 self.debug.emit("ERROR", error=str(exc))
@@ -121,8 +129,10 @@ class AgentRuntime:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
     ) -> dict[str, Any]:
         state = self._input(value)
+        self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
         execution = AgentExecution(
             self.definition.name, state, public_id, dict(context or {}), {"thread_id": thread_id}
@@ -133,7 +143,9 @@ class AgentRuntime:
             try:
                 await self.middleware.abefore_agent(execution)
                 result = await self.graph.ainvoke(state, graph_config)
-                return await self.middleware.aafter_agent(execution, result)
+                result = await self.middleware.aafter_agent(execution, result)
+                await self._aupdate_memory(result, memory_id)
+                return result
             except Exception as exc:
                 execution.error = exc
                 self.debug.emit("ERROR", error=str(exc))
@@ -149,9 +161,11 @@ class AgentRuntime:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
         **kwargs: Any,
     ) -> Iterator[Any]:
         state = self._input(value)
+        self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
         execution = AgentExecution(
             self.definition.name, state, public_id, dict(context or {}), {"thread_id": thread_id}
@@ -184,9 +198,11 @@ class AgentRuntime:
         *,
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
         state = self._input(value)
+        self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
         execution = AgentExecution(
             self.definition.name, state, public_id, dict(context or {}), {"thread_id": thread_id}
@@ -211,3 +227,59 @@ class AgentRuntime:
                     self.debug.emit("AGENT END", name=self.definition.name)
 
         return iterator()
+
+    @staticmethod
+    def _memory_query(value: str | dict[str, Any]) -> str:
+        if isinstance(value, str):
+            return value
+        return " ".join(str(getattr(item, "content", item)) for item in value["messages"][-3:])
+
+    def _load_memory(self, state: dict[str, Any], value: Any, memory_id: str | None) -> None:
+        if memory_id is None:
+            return
+        if not isinstance(memory_id, str) or not memory_id.strip():
+            raise ValueError("memory_id must be a non-empty string")
+        if self.memory is None:
+            raise ValueError("memory_id was provided but long-term memory is not configured")
+        loaded = self.memory.load(self.definition.name, memory_id.strip(), self._memory_query(value))
+        state["long_term_memories"] = loaded
+        self.debug.emit("MEMORY LOAD", memory_id=memory_id, count=len(loaded))
+
+    def _update_memory(self, result: Mapping[str, Any], memory_id: str | None) -> None:
+        if self.memory and memory_id:
+            self.memory.update(self.definition.name, memory_id.strip(), list(result.get("messages", [])))
+            self.debug.emit("MEMORY UPDATE", memory_id=memory_id)
+
+    async def _aupdate_memory(self, result: Mapping[str, Any], memory_id: str | None) -> None:
+        if self.memory and memory_id:
+            await self.memory.aupdate(
+                self.definition.name, memory_id.strip(), list(result.get("messages", []))
+            )
+            self.debug.emit("MEMORY UPDATE", memory_id=memory_id)
+
+    @staticmethod
+    def _decision(decision: str | Mapping[str, Any]) -> dict[str, Any]:
+        value = {"decision": decision} if isinstance(decision, str) else dict(decision)
+        action = value.get("decision", value.get("action"))
+        if action not in {"approve", "reject", "edit"}:
+            raise ValueError("decision must be approve, reject, or edit")
+        if action == "edit" and not isinstance(value.get("args"), Mapping):
+            raise ValueError("edit decision requires an args mapping")
+        value["decision"] = action
+        return value
+
+    def resume(self, *, session_id: str, decision: str | Mapping[str, Any]) -> dict[str, Any]:
+        config, thread_id, public_id = self._config(None, session_id)
+        execution = AgentExecution(self.definition.name, {}, public_id, {}, {"thread_id": thread_id})
+        self.debug.emit("HITL RESUME", decision=decision)
+        with self.middleware.execution_scope(execution):
+            return self.graph.invoke(Command(resume=self._decision(decision)), config)
+
+    async def aresume(
+        self, *, session_id: str, decision: str | Mapping[str, Any]
+    ) -> dict[str, Any]:
+        config, thread_id, public_id = self._config(None, session_id)
+        execution = AgentExecution(self.definition.name, {}, public_id, {}, {"thread_id": thread_id})
+        self.debug.emit("HITL RESUME", decision=decision)
+        with self.middleware.execution_scope(execution):
+            return await self.graph.ainvoke(Command(resume=self._decision(decision)), config)

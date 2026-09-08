@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
+from langgraph.errors import GraphInterrupt
+from langgraph.types import interrupt
 
 from .context import AgentContextManager
 from .debug import DebugHandler
@@ -50,6 +52,7 @@ class ReActStrategy(AgentStrategy):
         middleware: MiddlewarePipeline,
         checkpointer: Any = None,
     ) -> Any:
+        planning = isinstance(self, PlanExecuteStrategy)
         business_tools = {tool.name: tool for tool in definition.tools}
         internal_tools = self._skill_tools(
             skills,
@@ -68,7 +71,21 @@ class ReActStrategy(AgentStrategy):
 
         def prompt(state: Mapping[str, Any]) -> list[Any]:
             execution = middleware.current_execution()
-            return context.build_messages(state, execution.business_context)
+            messages = context.build_messages(state, execution.business_context)
+            if planning and state.get("plan"):
+                plan = state["plan"]
+                current = int(plan.get("current_step", 0))
+                steps = plan.get("steps", [])
+                directive = (
+                    "Execute only the current plan step. Use tools when useful and give a concise "
+                    "step result when complete."
+                )
+                if plan.get("status") == "synthesizing":
+                    directive = "Synthesize the completed plan results into the final answer."
+                elif current < len(steps):
+                    directive += f"\nCurrent step: {steps[current]}"
+                messages.insert(1, SystemMessage(content=directive))
+            return messages
 
         def prepare_node(state: Mapping[str, Any]) -> dict[str, Any]:
             return context.prepare_turn(state)
@@ -136,7 +153,7 @@ class ReActStrategy(AgentStrategy):
             removals = [RemoveMessage(id=item.id) for item in old if item.id]
             return {"summary": str(response.content), "messages": removals}
 
-        def route(state: Mapping[str, Any]) -> Literal["tools", "format", "done"]:
+        def route(state: Mapping[str, Any]) -> Literal["tools", "advance", "finalize", "format", "done"]:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
                 if int(state.get("iteration", 0)) >= definition.runtime_config.max_iterations:
@@ -144,7 +161,25 @@ class ReActStrategy(AgentStrategy):
                         f"Agent exceeded max_iterations={definition.runtime_config.max_iterations}"
                     )
                 return "tools"
+            if planning and state.get("plan", {}).get("status") not in {"synthesizing", "completed"}:
+                return "advance"
+            if planning:
+                return "finalize"
             return "format" if definition.response_format is not None else "done"
+
+        def advance_node(state: Mapping[str, Any]) -> dict[str, Any]:
+            plan = dict(state["plan"])
+            steps = [dict(step) for step in plan["steps"]]
+            index = int(plan["current_step"])
+            message = state["messages"][-1]
+            steps[index]["status"] = "completed"
+            steps[index]["result"] = str(message.content)
+            index += 1
+            plan.update(steps=steps, current_step=index)
+            if index >= len(steps):
+                plan["status"] = "synthesizing"
+            debug.emit("PLAN STEP", current_step=index, status=plan["status"])
+            return {"plan": plan}
 
         def tool_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
             return self._execute_tools(
@@ -177,16 +212,54 @@ class ReActStrategy(AgentStrategy):
         graph.add_node("summarize", RunnableLambda(summarize_node, async_summarize_node))
         graph.add_node("model", RunnableLambda(model_node, async_model_node))
         graph.add_node("tools", RunnableLambda(tool_node, async_tool_node))
-        graph.add_edge(START, "prepare")
+        if planning:
+            def finalize_node(state: Mapping[str, Any]) -> dict[str, Any]:
+                plan = dict(state["plan"])
+                plan["status"] = "completed"
+                return {"plan": plan}
+
+            graph.add_node("finalize", finalize_node)
+        if planning:
+            planner = definition.model.with_structured_output(_PlanOutput)
+
+            def plan_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+                request = [
+                    *context.build_messages(state, middleware.current_execution().business_context),
+                    AIMessage(content=f"Create a plan of at most {self.max_steps} concrete steps."),
+                ]
+                value = call_model(planner, state, config, request, "planner")
+                raw_steps = value.get("steps", []) if isinstance(value, Mapping) else value.steps
+                descriptions = [s.get("description", str(s)) if isinstance(s, Mapping) else str(s) for s in raw_steps]
+                if not descriptions or len(descriptions) > self.max_steps:
+                    raise ValueError(f"Planner must return 1..{self.max_steps} steps")
+                plan = {"steps": [{"step_id": str(i + 1), "description": item,
+                                    "status": "pending", "result": None}
+                                  for i, item in enumerate(descriptions)],
+                        "current_step": 0, "status": "executing", "replan_count": 0}
+                debug.emit("PLAN", plan=plan)
+                return {"plan": plan}
+
+            graph.add_node("planner", plan_node)
+            graph.add_edge(START, "planner")
+            graph.add_edge("planner", "prepare")
+            graph.add_node("advance", advance_node)
+            graph.add_edge("advance", "model")
+        else:
+            graph.add_edge(START, "prepare")
         graph.add_conditional_edges(
             "prepare", prepare_route, {"summarize": "summarize", "model": "model"}
         )
         graph.add_edge("summarize", "model")
         destinations: dict[str, Any] = {"tools": "tools", "done": END}
+        if planning:
+            destinations["advance"] = "advance"
+            destinations["finalize"] = "finalize"
         if definition.response_format is not None:
             destinations["format"] = "format"
         graph.add_conditional_edges("model", route, destinations)
         graph.add_edge("tools", "model")
+        if planning:
+            graph.add_edge("finalize", "format" if definition.response_format is not None else END)
 
         if definition.response_format is not None:
             formatter = definition.model.with_structured_output(definition.response_format)
@@ -204,6 +277,7 @@ class ReActStrategy(AgentStrategy):
             graph.add_node("format", RunnableLambda(format_node, async_format_node))
             graph.add_edge("format", END)
         return graph.compile(checkpointer=checkpointer)
+
 
     @staticmethod
     def _skill_tools(
@@ -342,10 +416,11 @@ class ReActStrategy(AgentStrategy):
             succeeded = False
             try:
                 self._require_loaded(call, loaded, registry)
+                args = self._approved_arguments(tools[call["name"]], call, debug)
                 request = ToolRequest(
                     middleware.current_execution(),
                     tools[call["name"]],
-                    call["args"],
+                    args,
                     config,
                     call["id"],
                 )
@@ -353,6 +428,8 @@ class ReActStrategy(AgentStrategy):
                     request, lambda req: req.tool.invoke(req.arguments, req.config)
                 )
                 succeeded = True
+            except GraphInterrupt:
+                raise
             except Exception as exc:  # noqa: BLE001 - tool failures are observations
                 debug.emit("ERROR", error=str(exc))
                 value = f"Error: {exc}"
@@ -401,10 +478,11 @@ class ReActStrategy(AgentStrategy):
             succeeded = False
             try:
                 self._require_loaded(call, loaded, registry)
+                args = self._approved_arguments(tools[call["name"]], call, debug)
                 request = ToolRequest(
                     middleware.current_execution(),
                     tools[call["name"]],
-                    call["args"],
+                    args,
                     config,
                     call["id"],
                 )
@@ -412,6 +490,8 @@ class ReActStrategy(AgentStrategy):
                     request, lambda req: req.tool.ainvoke(req.arguments, req.config)
                 )
                 succeeded = True
+            except GraphInterrupt:
+                raise
             except Exception as exc:  # noqa: BLE001 - tool failures are observations
                 debug.emit("ERROR", error=str(exc))
                 value = f"Error: {exc}"
@@ -434,3 +514,39 @@ class ReActStrategy(AgentStrategy):
             "active_skill": active,
             "skill_state": skill_state,
         }
+
+    @staticmethod
+    def _approved_arguments(tool: BaseTool, call: Mapping[str, Any], debug: DebugHandler) -> dict[str, Any]:
+        metadata = tool.metadata or {}
+        if not metadata.get("harness_approval"):
+            return dict(call["args"])
+        payload = {
+            "tool": tool.name,
+            "args": dict(call["args"]),
+            "message": metadata.get("harness_approval_message"),
+        }
+        debug.emit("HITL INTERRUPT", **payload)
+        decision = interrupt(payload)
+        if isinstance(decision, str):
+            decision = {"decision": decision}
+        action = decision.get("decision", decision.get("action"))
+        if action == "approve":
+            return dict(call["args"])
+        if action == "edit" and isinstance(decision.get("args"), Mapping):
+            return dict(decision["args"])
+        if action == "reject":
+            raise ValueError(f"Tool '{tool.name}' was rejected by the user")
+        raise ValueError("Invalid HITL resume decision")
+
+
+class _PlanOutput(TypedDict):
+    steps: list[dict[str, str]]
+
+
+class PlanExecuteStrategy(ReActStrategy):
+    """A bounded planner followed by the existing ReAct tool/runtime loop."""
+
+    def __init__(self, *, max_steps: int = 8, max_replans: int = 2) -> None:
+        if max_steps < 1 or max_replans < 0:
+            raise ValueError("max_steps must be positive and max_replans non-negative")
+        self.max_steps, self.max_replans = max_steps, max_replans

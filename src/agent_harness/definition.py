@@ -50,6 +50,8 @@ class AgentDefinition:
     middleware: Sequence[AgentMiddleware] = field(default_factory=tuple)
     subagent_names: tuple[str, ...] = ()
     runtime_config: RuntimeConfig = field(default_factory=RuntimeConfig)
+    store: Any | None = None
+    memory: Any | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():

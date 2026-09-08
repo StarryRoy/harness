@@ -85,6 +85,10 @@ class AgentContextManager:
         summary = state.get("summary")
         if summary:
             sections.append(f"Session summary of older messages:\n{summary}")
+        memories = state.get("long_term_memories", [])
+        if memories:
+            rendered = "\n".join(f"- {item}" for item in memories)
+            sections.append("Relevant cross-session memories:\n" + rendered)
         available = state.get("available_skills", [])
         if available:
             catalog = "\n".join(f"- {item['name']}: {item['description']}" for item in available)

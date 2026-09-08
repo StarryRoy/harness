@@ -8,10 +8,13 @@ from typing import Any
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
 
 from .agent import Agent
 from .definition import AgentDefinition, RuntimeConfig
 from .middleware import AgentMiddleware, default_middleware
+from .enterprise import GuardrailMiddleware, ModelFallbackMiddleware
+from .memory import LongTermMemory, MemoryConfig
 from .runtime import AgentRuntime
 from .skills import Skill, SkillLoader, SkillRegistry
 from .strategy import AgentStrategy, ReActStrategy
@@ -68,6 +71,11 @@ def create_agent(
     middleware_mode: str = "extend",
     checkpointer: Any | None = None,
     session_namespace: str | None = None,
+    store: Any | None = None,
+    memory: MemoryConfig | bool | None = None,
+    memory_schema: type | None = None,
+    guardrail: GuardrailMiddleware | None = None,
+    fallback: Sequence[BaseChatModel] | None = None,
 ) -> Agent:
     """Validate configuration, compile the graph, and return an Agent."""
     config = runtime_config or RuntimeConfig()
@@ -78,12 +86,15 @@ def create_agent(
         timeout_seconds=config.timeout_seconds,
         call_limit=config.call_limit,
     )
+    additions = tuple(item for item in (guardrail,) if item is not None)
+    if fallback:
+        additions += (ModelFallbackMiddleware(fallback),)
     if middleware is None:
-        resolved_middleware = defaults
+        resolved_middleware = (*defaults, *additions)
     elif middleware_mode == "extend":
-        resolved_middleware = (*defaults, *middleware)
+        resolved_middleware = (*defaults, *middleware, *additions)
     else:
-        resolved_middleware = tuple(middleware)
+        resolved_middleware = (*middleware, *additions)
 
     subagents = tuple(subagents or ())
     duplicate_subagents = {
@@ -107,10 +118,27 @@ def create_agent(
         resolved_skills.append(skill)
     registry.validate()
 
+    resolved_model = _resolve_model(model)
+    memory_config: MemoryConfig | None
+    if memory is True:
+        memory_config = MemoryConfig(schema=memory_schema)
+    elif isinstance(memory, MemoryConfig):
+        memory_config = memory
+        if memory_schema is not None:
+            memory_config.schema = memory_schema
+    elif memory is None:
+        memory_config = None
+    else:
+        raise TypeError("memory must be MemoryConfig, True, or None")
+    resolved_store = store if store is not None else (InMemoryStore() if memory_config else None)
+    memory_runtime = (
+        LongTermMemory(resolved_store, memory_config, resolved_model) if memory_config else None
+    )
+
     definition = AgentDefinition(
         name=name,
         description=description,
-        model=_resolve_model(model),
+        model=resolved_model,
         instructions=instructions,
         tools=tools,
         skills=tuple(resolved_skills),
@@ -119,6 +147,8 @@ def create_agent(
         middleware=resolved_middleware,
         subagent_names=tuple(agent.definition.name for agent in subagents),
         runtime_config=config,
+        store=resolved_store,
+        memory=memory_config,
     )
     runtime = AgentRuntime(
         definition,
@@ -126,5 +156,6 @@ def create_agent(
         registry,
         checkpointer if checkpointer is not None else MemorySaver(),
         session_namespace=session_namespace,
+        memory=memory_runtime,
     )
     return Agent(definition, runtime)

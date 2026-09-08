@@ -17,6 +17,8 @@ class AgentState(TypedDict, total=False):
     session_turn: int
     summary: str
     structured_response: Any
+    plan: dict[str, Any]
+    long_term_memories: list[dict[str, Any]]
 
 
 HARNESS_STATE_FIELDS = frozenset(AgentState.__annotations__)
