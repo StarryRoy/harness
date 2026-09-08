@@ -17,7 +17,7 @@ from langgraph.types import interrupt
 from .context import AgentContextManager
 from .debug import DebugHandler
 from .definition import AgentDefinition
-from .errors import ModelError
+from .errors import AgentError, ModelError, ToolError
 from .middleware import MiddlewarePipeline, ModelRequest, ToolRequest
 from .skills import SkillError, SkillRegistry, SkillScriptRunner
 from .state import compose_state_schema
@@ -111,7 +111,7 @@ class _ExecutionStrategySupport:
             )
             try:
                 return middleware.model(request, lambda req: target.invoke(req.messages, req.config))
-            except ModelError:
+            except AgentError:
                 raise
             except Exception as exc:
                 raise ModelError(f"Model call failed ({purpose})", cause=exc) from exc
@@ -135,7 +135,7 @@ class _ExecutionStrategySupport:
                 return await middleware.amodel(
                     request, lambda req: target.ainvoke(req.messages, req.config)
                 )
-            except ModelError:
+            except AgentError:
                 raise
             except Exception as exc:
                 raise ModelError(f"Async model call failed ({purpose})", cause=exc) from exc
@@ -463,7 +463,7 @@ class _ExecutionStrategySupport:
         any_failed = False
         for call in calls:
             if call["name"] not in tools:
-                raise ValueError(f"Model requested unknown tool: {call['name']}")
+                raise ToolError(f"Model requested unknown tool: {call['name']}")
             if call["name"] in subagent_names:
                 debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
             debug.emit("TOOL CALL", name=call["name"])
@@ -530,7 +530,7 @@ class _ExecutionStrategySupport:
         any_failed = False
         for call in calls:
             if call["name"] not in tools:
-                raise ValueError(f"Model requested unknown tool: {call['name']}")
+                raise ToolError(f"Model requested unknown tool: {call['name']}")
             if call["name"] in subagent_names:
                 debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
             debug.emit("TOOL CALL", name=call["name"])

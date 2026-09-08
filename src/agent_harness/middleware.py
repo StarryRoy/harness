@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import AgentError, MiddlewareError
+
 
 @dataclass(slots=True)
 class AgentExecution:
@@ -270,17 +272,38 @@ class MiddlewarePipeline:
     def before_agent(self, execution: AgentExecution) -> None:
         for item in self.middleware:
             self.debug.emit("MIDDLEWARE", hook="before_agent", name=type(item).__name__)
-            item.before_agent(execution)
+            try:
+                item.before_agent(execution)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.before_agent failed", cause=exc
+                ) from exc
 
     async def abefore_agent(self, execution: AgentExecution) -> None:
         for item in self.middleware:
             self.debug.emit("MIDDLEWARE", hook="before_agent", name=type(item).__name__)
-            await item.abefore_agent(execution)
+            try:
+                await item.abefore_agent(execution)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.before_agent failed", cause=exc
+                ) from exc
 
     def model(self, request: ModelRequest, handler: ModelHandler) -> Any:
         for item in self.middleware:
             self.debug.emit("MIDDLEWARE", hook="before_model", name=type(item).__name__)
-            item.before_model(request)
+            try:
+                item.before_model(request)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.before_model failed", cause=exc
+                ) from exc
         call = handler
         for item in reversed(self.middleware):
             next_call = call
@@ -293,14 +316,28 @@ class MiddlewarePipeline:
             call = wrapped_model
         response = call(request)
         for item in reversed(self.middleware):
-            updated = item.after_model(request, response)
+            try:
+                updated = item.after_model(request, response)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.after_model failed", cause=exc
+                ) from exc
             response = response if updated is None else updated
         return response
 
     async def amodel(self, request: ModelRequest, handler: AsyncModelHandler) -> Any:
         for item in self.middleware:
             self.debug.emit("MIDDLEWARE", hook="before_model", name=type(item).__name__)
-            await item.abefore_model(request)
+            try:
+                await item.abefore_model(request)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.before_model failed", cause=exc
+                ) from exc
         call = handler
         for item in reversed(self.middleware):
             next_call = call
@@ -311,7 +348,14 @@ class MiddlewarePipeline:
             call = wrapped
         response = await call(request)
         for item in reversed(self.middleware):
-            updated = await item.aafter_model(request, response)
+            try:
+                updated = await item.aafter_model(request, response)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.after_model failed", cause=exc
+                ) from exc
             response = response if updated is None else updated
         return response
 
@@ -342,14 +386,28 @@ class MiddlewarePipeline:
     def after_agent(self, execution: AgentExecution, result: Any) -> Any:
         for item in reversed(self.middleware):
             self.debug.emit("MIDDLEWARE", hook="after_agent", name=type(item).__name__)
-            updated = item.after_agent(execution, result)
+            try:
+                updated = item.after_agent(execution, result)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.after_agent failed", cause=exc
+                ) from exc
             result = result if updated is None else updated
         return result
 
     async def aafter_agent(self, execution: AgentExecution, result: Any) -> Any:
         for item in reversed(self.middleware):
             self.debug.emit("MIDDLEWARE", hook="after_agent", name=type(item).__name__)
-            updated = await item.aafter_agent(execution, result)
+            try:
+                updated = await item.aafter_agent(execution, result)
+            except AgentError:
+                raise
+            except Exception as exc:
+                raise MiddlewareError(
+                    f"{type(item).__name__}.after_agent failed", cause=exc
+                ) from exc
             result = result if updated is None else updated
         return result
 
