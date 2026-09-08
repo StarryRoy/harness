@@ -16,8 +16,11 @@ class AgentState(TypedDict, total=False):
     skill_state: dict[str, dict[str, Any]]
     session_turn: int
     summary: str
+    summarized_messages: list[AnyMessage]
+    context: dict[str, Any]
     structured_response: Any
     plan: dict[str, Any]
+    step_failed: bool
     long_term_memories: list[dict[str, Any]]
 
 

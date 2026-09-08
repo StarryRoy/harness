@@ -30,29 +30,44 @@ class LongTermMemory:
             raise MemoryError(
                 "Long-term memory requires the optional 'langmem' package", cause=exc
             ) from exc
-        kwargs: dict[str, Any] = {"model": config.model or default_model}
+        kwargs: dict[str, Any] = {
+            "model": config.model or default_model,
+            "namespace": (config.namespace, "{agent_name}", "{memory_id}"),
+        }
         if config.instructions is not None:
             kwargs["instructions"] = config.instructions
         if config.schema is not None:
             kwargs["schemas"] = [config.schema]
-        self.manager = create_memory_store_manager(**kwargs)
+        try:
+            self.manager = create_memory_store_manager(**kwargs)
+        except Exception as exc:
+            raise MemoryError("Unable to configure LangMem memory manager", cause=exc) from exc
 
     def namespace(self, agent: str, memory_id: str) -> tuple[str, ...]:
         return (self.config.namespace, agent, memory_id)
 
     def load(self, agent: str, memory_id: str, query: str) -> list[dict[str, Any]]:
-        items = self.store.search(
-            self.namespace(agent, memory_id), query=query, limit=self.config.search_limit
-        )
-        return [dict(item.value) for item in items]
+        try:
+            items = self.store.search(
+                self.namespace(agent, memory_id), query=query, limit=self.config.search_limit
+            )
+            return [dict(item.value) for item in items]
+        except Exception as exc:
+            raise MemoryError("Unable to search long-term memory", cause=exc) from exc
 
     def update(self, agent: str, memory_id: str, messages: list[Any]) -> Any:
-        namespace = self.namespace(agent, memory_id)
-        config = {"configurable": {"langgraph_store": self.store, "namespace": namespace}}
-        # LangMem owns extraction, deduplication, consolidation and update decisions.
-        return self.manager.invoke({"messages": messages}, config=config)
+        config = {"configurable": {"agent_name": agent, "memory_id": memory_id}}
+        try:
+            # LangMem owns extraction, deduplication, consolidation and updates.
+            return self.manager.invoke({"messages": messages}, config=config, store=self.store)
+        except Exception as exc:
+            raise MemoryError("Unable to update long-term memory", cause=exc) from exc
 
     async def aupdate(self, agent: str, memory_id: str, messages: list[Any]) -> Any:
-        namespace = self.namespace(agent, memory_id)
-        config = {"configurable": {"langgraph_store": self.store, "namespace": namespace}}
-        return await self.manager.ainvoke({"messages": messages}, config=config)
+        config = {"configurable": {"agent_name": agent, "memory_id": memory_id}}
+        try:
+            return await self.manager.ainvoke(
+                {"messages": messages}, config=config, store=self.store
+            )
+        except Exception as exc:
+            raise MemoryError("Unable to update long-term memory", cause=exc) from exc

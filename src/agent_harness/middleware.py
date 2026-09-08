@@ -29,6 +29,22 @@ class ModelRequest:
     messages: list[Any]
     config: Mapping[str, Any]
     purpose: str = "agent"
+    tools: tuple[Any, ...] = ()
+    response_format: Any | None = None
+
+    def runnable_for(self, model: Any) -> Any:
+        """Recreate the current call shape on another base chat model."""
+        if self.response_format is not None:
+            return model.with_structured_output(self.response_format)
+        if self.tools:
+            return model.bind_tools(list(self.tools))
+        return model
+
+    def invoke_with(self, model: Any) -> Any:
+        return self.runnable_for(model).invoke(self.messages, self.config)
+
+    async def ainvoke_with(self, model: Any) -> Any:
+        return await self.runnable_for(model).ainvoke(self.messages, self.config)
 
 
 @dataclass(slots=True)
@@ -268,7 +284,13 @@ class MiddlewarePipeline:
         call = handler
         for item in reversed(self.middleware):
             next_call = call
-            call = lambda req, mw=item, nxt=next_call: mw.wrap_model_call(req, nxt)
+
+            def wrapped_model(
+                req: ModelRequest, mw: AgentMiddleware = item, nxt: ModelHandler = next_call
+            ) -> Any:
+                return mw.wrap_model_call(req, nxt)
+
+            call = wrapped_model
         response = call(request)
         for item in reversed(self.middleware):
             updated = item.after_model(request, response)
@@ -297,7 +319,13 @@ class MiddlewarePipeline:
         call = handler
         for item in reversed(self.middleware):
             next_call = call
-            call = lambda req, mw=item, nxt=next_call: mw.wrap_tool_call(req, nxt)
+
+            def wrapped_tool(
+                req: ToolRequest, mw: AgentMiddleware = item, nxt: ToolHandler = next_call
+            ) -> Any:
+                return mw.wrap_tool_call(req, nxt)
+
+            call = wrapped_tool
         return call(request)
 
     async def atool(self, request: ToolRequest, handler: AsyncToolHandler) -> Any:
