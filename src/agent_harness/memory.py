@@ -31,7 +31,6 @@ class LongTermMemory:
                 "Long-term memory requires the optional 'langmem' package", cause=exc
             ) from exc
         kwargs: dict[str, Any] = {
-            "model": config.model or default_model,
             "namespace": (config.namespace, "{agent_name}", "{memory_id}"),
         }
         if config.instructions is not None:
@@ -39,7 +38,7 @@ class LongTermMemory:
         if config.schema is not None:
             kwargs["schemas"] = [config.schema]
         try:
-            self.manager = create_memory_store_manager(**kwargs)
+            self.manager = create_memory_store_manager(config.model or default_model, **kwargs)
         except Exception as exc:
             raise MemoryError("Unable to configure LangMem memory manager", cause=exc) from exc
 

@@ -86,15 +86,16 @@ def create_agent(
         timeout_seconds=config.timeout_seconds,
         call_limit=config.call_limit,
     )
+    # The first middleware is the outermost wrapper.  Fallback must therefore
+    # surround retry so it only runs after the primary model exhausts retries.
+    fallback_middleware = (ModelFallbackMiddleware(fallback),) if fallback else ()
     additions = tuple(item for item in (guardrail,) if item is not None)
-    if fallback:
-        additions += (ModelFallbackMiddleware(fallback),)
     if middleware is None:
-        resolved_middleware = (*defaults, *additions)
+        resolved_middleware = (*fallback_middleware, *defaults, *additions)
     elif middleware_mode == "extend":
-        resolved_middleware = (*defaults, *middleware, *additions)
+        resolved_middleware = (*fallback_middleware, *defaults, *middleware, *additions)
     else:
-        resolved_middleware = (*middleware, *additions)
+        resolved_middleware = (*fallback_middleware, *middleware, *additions)
 
     subagents = tuple(subagents or ())
     duplicate_subagents = {
