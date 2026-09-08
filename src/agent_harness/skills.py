@@ -17,8 +17,10 @@ from typing import Any
 
 import yaml
 
+from .errors import SkillError as HarnessSkillError
 
-class SkillError(ValueError):
+
+class SkillError(HarnessSkillError, ValueError):
     """Raised for an invalid skill definition or registry operation."""
 
 

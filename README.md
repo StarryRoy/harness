@@ -124,6 +124,34 @@ Schema 不能覆盖。`context` 是单次执行的业务 Runtime Context，不�
 长会话达到阈值后由当前模型摘要旧消息，保存 `summary` 并保留最近消息。旧 Tool
 Result 在模型上下文中会先被省略或截断，不会无限堆积。
 
+## Plan & Execute、长期记忆与 HITL
+
+默认仍为 `ReActStrategy`；复杂任务可传
+`strategy=PlanExecuteStrategy(max_steps=8, max_replans=2)`。Planner 使用模型原生
+`with_structured_output()` 生成有界计划，执行阶段继续复用相同 Tool、Skill、
+SubAgent、Middleware、Session 与 Checkpoint runtime，结果 state 的 `plan` 包含
+`steps`、`current_step`、`status` 和 `replan_count`。
+
+安装 `agent-harness[memory]` 后，通过 `memory=True` 启用基于 LangGraph Store 和
+LangMem manager 的跨会话记忆。开发默认使用 `InMemoryStore`，生产可传 `store=`；
+应用只需在调用时同时提供稳定的 `memory_id`：
+
+```python
+agent = create_agent(..., memory=True)
+agent.invoke("我喜欢简洁报告", session_id="A", memory_id="user-1")
+agent.invoke("按我的偏好写", session_id="B", memory_id="user-1")
+```
+
+用 `require_approval(tool)` 标记敏感工具。图会通过 LangGraph `interrupt()` 暂停，
+随后调用 `agent.resume(session_id="...", decision="approve")`；也支持 `reject`，或
+`{"decision": "edit", "args": {...}}` 修改参数。计划和步骤结果由 Checkpointer
+原样保留。`GuardrailMiddleware` 支持 input/tool/output 的 pass、reject、modify；
+`fallback=[model_b, model_c]` 在主模型重试耗尽后依次降级。
+
+MCP 不使用专属 runtime。安装 `agent-harness[mcp]` 后，调用异步
+`load_mcp_tools(server_config)`，并把得到的标准 `BaseTool` 列表传入 `tools=`，即可
+自动获得现有 Middleware、HITL、Debug 和调用上限能力。
+
 ## Advanced Skills
 
 Skill 目录示例：

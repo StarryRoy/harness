@@ -13,9 +13,13 @@ dependencies = [
   "PyYAML>=6.0,<7",
 ]
 
+[project.optional-dependencies]
+memory = ["langmem>=0.0.29,<1"]
+mcp = ["langchain-mcp-adapters>=0.1,<1"]
+enterprise = ["langmem>=0.0.29,<1", "langchain-mcp-adapters>=0.1,<1"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_harness"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-
