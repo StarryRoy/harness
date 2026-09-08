@@ -65,8 +65,9 @@ Main Agent。
 
 ## Middleware
 
-未配置时默认启用 `CallLimitMiddleware`、`RetryMiddleware` 和
-`TimeoutMiddleware`。生命周期为：
+未配置时默认启用 `RetryMiddleware`、`CallLimitMiddleware` 和
+`TimeoutMiddleware`。Retry 位于 CallLimit 外层，因此每一次实际 Model/Tool retry
+attempt 都会单独计入调用上限。生命周期为：
 
 ```text
 before_agent -> before_model -> wrap_model_call -> after_model
@@ -78,9 +79,10 @@ Before 按注册顺序执行，Wrapper 的第一个注册项位于最外层，Af
 稳定顺序追加；只有显式传 `middleware_mode="replace"` 才完全替换默认项。
 自定义中间件继承 `AgentMiddleware`，异步特殊逻辑可覆盖对应的 `a...` 方法。
 
-`TimeoutMiddleware` 的异步路径使用可取消的 `asyncio.wait_for`。同步 Model/Tool
-调用无法可靠取消，因此同步路径直接执行、不制造后台残留任务或由 timeout 引发的
-重复调用；需要强制超时时应使用异步接口及底层客户端自身的 timeout。
+`timeout_seconds` 只对异步 Runtime 提供 Harness 级强制超时，底层使用可取消的
+`asyncio.wait_for`。同步 Model/Tool 调用无法可靠取消，因此同步路径始终在线程内直接
+执行；它不会启动后台工作线程，也不会在超时后重试仍在运行的副作用。同步调用需要
+由 Provider/Tool 客户端配置自身 timeout；需要 Harness 强制超时时应使用异步接口。
 
 默认超时、重试、调用上限和 Context 策略由 `RuntimeConfig` 配置：
 
@@ -106,9 +108,11 @@ config = RuntimeConfig(
 ```python
 from typing import TypedDict
 
+
 class BusinessState(TypedDict, total=False):
     project_id: str
     approval_status: str
+
 
 agent = create_agent(..., state_schema=BusinessState)
 state = agent.invoke(
@@ -119,12 +123,16 @@ state = agent.invoke(
 
 业务字段与 Harness State 在建图时合并。`messages`、`iteration`、
 `runtime_metadata`、`available_skills`、`loaded_skills`、`active_skill`、
-`skill_state`、`session_turn`、`summary` 和 `structured_response` 是保留字段，业务
-Schema 不能覆盖。`context` 是单次执行的业务 Runtime Context，不写入会话 State。
+`skill_state`、`session_turn`、`summary`、`summarized_messages`、`context`、
+`pending_tool_calls`、`tool_call_index` 和 `structured_response` 是保留字段，业务
+Schema 不能覆盖。调用参数 `context=` 是单次执行的业务 Runtime Context，不写入
+会话 State。
 
-长会话达到消息或 token 阈值后，由 LangMem `SummarizationNode` 压缩旧消息并保留
-近期上下文；Harness 只提供默认阈值和接线。旧 Tool Result 在模型上下文中会先被
-省略或截断，不会无限堆积。
+长会话达到消息或 token 阈值后，由 LangMem `summarize_messages` 压缩旧消息并保留
+近期上下文；Harness 只提供默认阈值和接线。模型上下文始终由“压缩快照 + 快照后新增
+消息”组成，因此摘要后的 Tool Call/Tool Result 不会丢失。旧 Tool Result 在模型
+上下文中会先被省略或截断，不会无限堆积。PlanExecute 的入口顺序为
+`prepare -> summarize（按需）-> planner`，Planner 会看到本轮最新输入和最新摘要。
 
 ## Plan & Execute、长期记忆与 HITL
 
@@ -147,14 +155,19 @@ agent.invoke("按我的偏好写", session_id="B", memory_id="user-1")
 
 未传入 `store` 时 Harness 使用普通 `InMemoryStore`，适合开发和功能验证。需要语义相似度
 检索时，应由调用方传入已配置 vector index/embedding 的 LangGraph `BaseStore`；Harness
-不会选择或硬编码 embedding provider。长期记忆默认按
-`(namespace, agent_name, memory_id)` 隔离，因此 SubAgent 不会自动共享记忆。
+不会选择或硬编码 embedding provider。Main 委派时会把稳定的 `memory_id` 传给已启用
+Memory 的 SubAgent；长期记忆仍按 `(namespace, agent_name, memory_id)` 隔离，因此
+SubAgent A/B 和 Main 不会读取彼此的记忆。
 
 用 `require_approval(tool)` 标记敏感工具。图会通过 LangGraph `interrupt()` 暂停，
 随后调用 `agent.resume(session_id="...", decision="approve")`；也支持 `reject`，或
-`{"decision": "edit", "args": {...}}` 修改参数。计划和步骤结果由 Checkpointer
-原样保留。`GuardrailMiddleware` 支持 input/tool/output 的 pass、reject、modify；
-`fallback=[model_b, model_c]` 在主模型重试耗尽后依次降级。
+`{"decision": "edit", "args": {...}}` 修改参数。每个 Tool Call 单独形成可检查点的
+图步骤，因此一条 AIMessage 中较早完成的副作用工具不会在后续审批恢复时重放。
+SubAgent 内的审批会通过稳定的 parent-session/subagent/tool-call 映射传播到 Main，
+应用仍只需恢复 Main session。计划和步骤结果由 Checkpointer 原样保留。
+`GuardrailMiddleware` 支持 input/tool/output 的 pass、reject、modify；
+`fallback=[model_b, model_c]` 在主模型重试耗尽后依次降级，Fallback 调用继续经过其
+下游的 Retry、CallLimit、Timeout 和自定义 model wrapper。
 
 MCP 不使用专属 runtime。安装 `agent-harness[mcp]` 后，调用异步
 `load_mcp_tools(server_config)`，并把得到的标准 `BaseTool` 列表传入 `tools=`，即可

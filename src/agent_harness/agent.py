@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -9,9 +10,12 @@ from typing import Any
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.errors import GraphInterrupt
+from langgraph.types import interrupt
 
 from .definition import AgentDefinition
 from .errors import SubAgentError
+from .middleware import MiddlewarePipeline
 from .runtime import AgentRuntime
 
 
@@ -122,14 +126,68 @@ class Agent:
             or (f"Delegate a self-contained task to the {self.definition.name} agent.")
         )
 
+        def child_scope() -> tuple[str | None, str | None]:
+            try:
+                parent = MiddlewarePipeline.current_execution()
+            except RuntimeError:
+                return None, None
+            call_id = parent.metadata.get("current_tool_call_id")
+            parent_scope = parent.metadata.get("thread_id") or parent.session_id
+            if not call_id or not parent_scope:
+                return None, None
+            digest = hashlib.sha256(
+                f"{parent_scope}:{self.definition.name}:{call_id}".encode()
+            ).hexdigest()
+            runtime_metadata = parent.input.get("runtime_metadata", {})
+            memory_id = runtime_metadata.get("memory_id")
+            if self.runtime.memory is None:
+                memory_id = None
+            return f"parent-call-{digest}", memory_id
+
+        def pause_payload(task: str, child_session: str) -> dict[str, Any]:
+            return {
+                "subagent": self.definition.name,
+                "task": task,
+                "interrupts": self.runtime.pending_interrupts(session_id=child_session),
+            }
+
+        async def apause_payload(task: str, child_session: str) -> dict[str, Any]:
+            return {
+                "subagent": self.definition.name,
+                "task": task,
+                "interrupts": await self.runtime.apending_interrupts(
+                    session_id=child_session
+                ),
+            }
+
         def run(task: str) -> dict[str, Any]:
             """Delegate one explicit task and return only its final business result."""
             self.runtime.debug.emit(
                 "SUBAGENT CALL", name=self.definition.name, task=task
             )
             try:
-                state = self.invoke(task)
+                child_session, memory_id = child_scope()
+                if child_session and self.runtime.is_paused(session_id=child_session):
+                    decision = interrupt(pause_payload(task, child_session))
+                    state = self.resume(
+                        session_id=child_session,
+                        decision=decision,
+                    )
+                else:
+                    state = self.invoke(
+                        task, session_id=child_session, memory_id=memory_id
+                    )
+                    if child_session and self.runtime.is_paused(
+                        session_id=child_session
+                    ):
+                        decision = interrupt(pause_payload(task, child_session))
+                        state = self.resume(
+                            session_id=child_session,
+                            decision=decision,
+                        )
                 result = self._subagent_result(state)
+            except GraphInterrupt:
+                raise
             except Exception as exc:  # noqa: BLE001 - errors become isolated tool results
                 error = SubAgentError(
                     f"SubAgent '{self.definition.name}' invocation failed", cause=exc
@@ -153,8 +211,30 @@ class Agent:
                 "SUBAGENT CALL", name=self.definition.name, task=task
             )
             try:
-                state = await self.ainvoke(task)
+                child_session, memory_id = child_scope()
+                if child_session and await self.runtime.ais_paused(
+                    session_id=child_session
+                ):
+                    decision = interrupt(await apause_payload(task, child_session))
+                    state = await self.aresume(
+                        session_id=child_session,
+                        decision=decision,
+                    )
+                else:
+                    state = await self.ainvoke(
+                        task, session_id=child_session, memory_id=memory_id
+                    )
+                    if child_session and await self.runtime.ais_paused(
+                        session_id=child_session
+                    ):
+                        decision = interrupt(await apause_payload(task, child_session))
+                        state = await self.aresume(
+                            session_id=child_session,
+                            decision=decision,
+                        )
                 result = self._subagent_result(state)
+            except GraphInterrupt:
+                raise
             except Exception as exc:  # noqa: BLE001 - errors become isolated tool results
                 error = SubAgentError(
                     f"SubAgent '{self.definition.name}' invocation failed", cause=exc

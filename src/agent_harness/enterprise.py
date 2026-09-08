@@ -115,7 +115,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
                         primary_error=str(primary),
                     )
                 try:
-                    return request.invoke_with(model)
+                    return call_next(request.with_model(model))
                 except Exception as exc:  # noqa: BLE001 - continue through configured fallbacks
                     last = exc
             raise last from primary
@@ -134,7 +134,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
                         primary_error=str(primary),
                     )
                 try:
-                    return await request.ainvoke_with(model)
+                    return await call_next(request.with_model(model))
                 except Exception as exc:  # noqa: BLE001 - continue through configured fallbacks
                     last = exc
             raise last from primary

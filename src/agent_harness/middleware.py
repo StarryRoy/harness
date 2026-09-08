@@ -8,7 +8,7 @@ import inspect
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .errors import AgentError, MiddlewareError
@@ -34,6 +34,11 @@ class ModelRequest:
     purpose: str = "agent"
     tools: tuple[Any, ...] = ()
     response_format: Any | None = None
+    model_override: Any | None = None
+
+    def with_model(self, model: Any) -> ModelRequest:
+        """Continue the current middleware chain with another base model."""
+        return replace(self, model_override=model)
 
     def runnable_for(self, model: Any) -> Any:
         """Recreate the current call shape on another base chat model."""
@@ -317,7 +322,13 @@ class MiddlewarePipeline:
                 raise MiddlewareError(
                     f"{type(item).__name__}.before_model failed", cause=exc
                 ) from exc
-        call = handler
+
+        def terminal(req: ModelRequest) -> Any:
+            if req.model_override is not None:
+                return req.invoke_with(req.model_override)
+            return handler(req)
+
+        call: ModelHandler = terminal
         for item in reversed(self.middleware):
             next_call = call
 
@@ -353,7 +364,13 @@ class MiddlewarePipeline:
                 raise MiddlewareError(
                     f"{type(item).__name__}.before_model failed", cause=exc
                 ) from exc
-        call = handler
+
+        async def terminal(req: ModelRequest) -> Any:
+            if req.model_override is not None:
+                return await req.ainvoke_with(req.model_override)
+            return await handler(req)
+
+        call: AsyncModelHandler = terminal
         for item in reversed(self.middleware):
             next_call = call
 
@@ -441,7 +458,7 @@ def default_middleware(
     *, retry_attempts: int = 2, timeout_seconds: float = 60.0, call_limit: int = 48
 ) -> tuple[AgentMiddleware, ...]:
     return (
-        CallLimitMiddleware(call_limit),
         RetryMiddleware(retry_attempts),
+        CallLimitMiddleware(call_limit),
         TimeoutMiddleware(timeout_seconds),
     )

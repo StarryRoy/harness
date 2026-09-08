@@ -21,6 +21,8 @@ class AgentState(TypedDict, total=False):
     structured_response: Any
     plan: dict[str, Any]
     step_failed: bool
+    pending_tool_calls: list[dict[str, Any]]
+    tool_call_index: int
     long_term_memories: list[dict[str, Any]]
 
 

@@ -95,8 +95,12 @@ class _ExecutionStrategySupport:
         def prepare_node(state: Mapping[str, Any]) -> dict[str, Any]:
             return context.prepare_turn(state)
 
-        def prepare_route(state: Mapping[str, Any]) -> Literal["summarize", "model"]:
-            return "summarize" if context.needs_summary(state) else "model"
+        def prepare_route(
+            state: Mapping[str, Any],
+        ) -> Literal["summarize", "planner", "model"]:
+            if context.needs_summary(state):
+                return "summarize"
+            return "planner" if planning else "model"
 
         def call_model(
             target: Any,
@@ -396,8 +400,6 @@ class _ExecutionStrategySupport:
                 return {"plan": plan}
 
             graph.add_node("planner", plan_node)
-            graph.add_edge(START, "planner")
-            graph.add_edge("planner", "prepare")
             graph.add_node("advance", advance_node)
             graph.add_edge("advance", "model")
 
@@ -458,12 +460,22 @@ class _ExecutionStrategySupport:
 
             graph.add_node("replan", replan_node)
             graph.add_edge("replan", "model")
+        graph.add_edge(START, "prepare")
+        if planning:
+            graph.add_conditional_edges(
+                "prepare",
+                prepare_route,
+                {"summarize": "summarize", "planner": "planner"},
+            )
+            graph.add_edge("summarize", "planner")
+            graph.add_edge("planner", "model")
         else:
-            graph.add_edge(START, "prepare")
-        graph.add_conditional_edges(
-            "prepare", prepare_route, {"summarize": "summarize", "model": "model"}
-        )
-        graph.add_edge("summarize", "model")
+            graph.add_conditional_edges(
+                "prepare",
+                prepare_route,
+                {"summarize": "summarize", "model": "model"},
+            )
+            graph.add_edge("summarize", "model")
         destinations: dict[str, Any] = {"tools": "tools", "done": END}
         if planning:
             destinations["advance"] = "advance"
@@ -472,7 +484,13 @@ class _ExecutionStrategySupport:
         if definition.response_format is not None:
             destinations["format"] = "format"
         graph.add_conditional_edges("model", route, destinations)
-        graph.add_edge("tools", "model")
+
+        def tool_route(state: Mapping[str, Any]) -> Literal["tools", "model"]:
+            return "tools" if state.get("pending_tool_calls") else "model"
+
+        graph.add_conditional_edges(
+            "tools", tool_route, {"tools": "tools", "model": "model"}
+        )
         if planning:
             graph.add_edge(
                 "finalize", "format" if definition.response_format is not None else END
@@ -640,64 +658,77 @@ class _ExecutionStrategySupport:
         config: RunnableConfig,
         debug: DebugHandler,
     ) -> dict[str, Any]:
-        calls = state["messages"][-1].tool_calls
+        calls = list(state.get("pending_tool_calls", []))
+        index = int(state.get("tool_call_index", 0))
+        if not calls:
+            calls = list(state["messages"][-1].tool_calls)
+            index = 0
+        call = calls[index]
         loaded = list(state.get("loaded_skills", []))
         skill_state = dict(state.get("skill_state", {}))
         active = state.get("active_skill")
-        results = []
         any_failed = False
-        for call in calls:
-            if call["name"] not in tools:
-                raise ToolError(f"Model requested unknown tool: {call['name']}")
-            if call["name"] in subagent_names:
-                debug.emit(
-                    "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
-                )
-            debug.emit("TOOL CALL", name=call["name"])
-            if "mcp" in type(tools[call["name"]]).__module__.lower() or (
-                tools[call["name"]].metadata or {}
-            ).get("mcp"):
-                debug.emit("MCP TOOL", name=call["name"])
-            succeeded = False
-            try:
-                self._require_loaded(call, loaded, registry)
-                args = self._approved_arguments(tools[call["name"]], call, debug)
-                request = ToolRequest(
-                    middleware.current_execution(),
-                    tools[call["name"]],
-                    args,
-                    config,
-                    call["id"],
-                )
-                value = middleware.tool(
-                    request, lambda req: req.tool.invoke(req.arguments, req.config)
-                )
-                succeeded = True
-            except GraphInterrupt:
-                raise
-            except Exception as exc:  # noqa: BLE001 - tool failures are observations
-                any_failed = True
-                debug.emit("ERROR", error=str(exc))
-                value = f"Error: {exc}"
-            if succeeded:
-                loaded, skill_state, active = self._skill_state_after(
-                    call,
-                    loaded,
-                    skill_state,
-                    registry,
-                    business_tool_names,
-                    int(state.get("session_turn", 1)),
-                )
-            debug.emit("TOOL RESULT", name=call["name"], result=value)
-            if call["name"] in subagent_names:
-                debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
-            results.append(self._result(call, value))
+        if call["name"] not in tools:
+            raise ToolError(f"Model requested unknown tool: {call['name']}")
+        if call["name"] in subagent_names:
+            debug.emit(
+                "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
+            )
+        debug.emit("TOOL CALL", name=call["name"])
+        if "mcp" in type(tools[call["name"]]).__module__.lower() or (
+            tools[call["name"]].metadata or {}
+        ).get("mcp"):
+            debug.emit("MCP TOOL", name=call["name"])
+        succeeded = False
+        execution = middleware.current_execution()
+        previous_call_id = execution.metadata.get("current_tool_call_id")
+        execution.metadata["current_tool_call_id"] = call["id"]
+        try:
+            self._require_loaded(call, loaded, registry)
+            args = self._approved_arguments(tools[call["name"]], call, debug)
+            request = ToolRequest(
+                execution,
+                tools[call["name"]],
+                args,
+                config,
+                call["id"],
+            )
+            value = middleware.tool(
+                request, lambda req: req.tool.invoke(req.arguments, req.config)
+            )
+            succeeded = True
+        except GraphInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001 - tool failures are observations
+            any_failed = True
+            debug.emit("ERROR", error=str(exc))
+            value = f"Error: {exc}"
+        finally:
+            if previous_call_id is None:
+                execution.metadata.pop("current_tool_call_id", None)
+            else:
+                execution.metadata["current_tool_call_id"] = previous_call_id
+        if succeeded:
+            loaded, skill_state, active = self._skill_state_after(
+                call,
+                loaded,
+                skill_state,
+                registry,
+                business_tool_names,
+                int(state.get("session_turn", 1)),
+            )
+        debug.emit("TOOL RESULT", name=call["name"], result=value)
+        if call["name"] in subagent_names:
+            debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
+        next_index = index + 1
         return {
-            "messages": results,
+            "messages": [self._result(call, value)],
             "loaded_skills": loaded,
             "active_skill": active,
             "skill_state": skill_state,
             "step_failed": bool(state.get("step_failed")) or any_failed,
+            "pending_tool_calls": calls if next_index < len(calls) else [],
+            "tool_call_index": next_index if next_index < len(calls) else 0,
         }
 
     async def _aexecute_tools(
@@ -711,64 +742,77 @@ class _ExecutionStrategySupport:
         config: RunnableConfig,
         debug: DebugHandler,
     ) -> dict[str, Any]:
-        calls = state["messages"][-1].tool_calls
+        calls = list(state.get("pending_tool_calls", []))
+        index = int(state.get("tool_call_index", 0))
+        if not calls:
+            calls = list(state["messages"][-1].tool_calls)
+            index = 0
+        call = calls[index]
         loaded = list(state.get("loaded_skills", []))
         skill_state = dict(state.get("skill_state", {}))
         active = state.get("active_skill")
-        results = []
         any_failed = False
-        for call in calls:
-            if call["name"] not in tools:
-                raise ToolError(f"Model requested unknown tool: {call['name']}")
-            if call["name"] in subagent_names:
-                debug.emit(
-                    "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
-                )
-            debug.emit("TOOL CALL", name=call["name"])
-            if "mcp" in type(tools[call["name"]]).__module__.lower() or (
-                tools[call["name"]].metadata or {}
-            ).get("mcp"):
-                debug.emit("MCP TOOL", name=call["name"])
-            succeeded = False
-            try:
-                self._require_loaded(call, loaded, registry)
-                args = self._approved_arguments(tools[call["name"]], call, debug)
-                request = ToolRequest(
-                    middleware.current_execution(),
-                    tools[call["name"]],
-                    args,
-                    config,
-                    call["id"],
-                )
-                value = await middleware.atool(
-                    request, lambda req: req.tool.ainvoke(req.arguments, req.config)
-                )
-                succeeded = True
-            except GraphInterrupt:
-                raise
-            except Exception as exc:  # noqa: BLE001 - tool failures are observations
-                any_failed = True
-                debug.emit("ERROR", error=str(exc))
-                value = f"Error: {exc}"
-            if succeeded:
-                loaded, skill_state, active = self._skill_state_after(
-                    call,
-                    loaded,
-                    skill_state,
-                    registry,
-                    business_tool_names,
-                    int(state.get("session_turn", 1)),
-                )
-            debug.emit("TOOL RESULT", name=call["name"], result=value)
-            if call["name"] in subagent_names:
-                debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
-            results.append(self._result(call, value))
+        if call["name"] not in tools:
+            raise ToolError(f"Model requested unknown tool: {call['name']}")
+        if call["name"] in subagent_names:
+            debug.emit(
+                "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
+            )
+        debug.emit("TOOL CALL", name=call["name"])
+        if "mcp" in type(tools[call["name"]]).__module__.lower() or (
+            tools[call["name"]].metadata or {}
+        ).get("mcp"):
+            debug.emit("MCP TOOL", name=call["name"])
+        succeeded = False
+        execution = middleware.current_execution()
+        previous_call_id = execution.metadata.get("current_tool_call_id")
+        execution.metadata["current_tool_call_id"] = call["id"]
+        try:
+            self._require_loaded(call, loaded, registry)
+            args = self._approved_arguments(tools[call["name"]], call, debug)
+            request = ToolRequest(
+                execution,
+                tools[call["name"]],
+                args,
+                config,
+                call["id"],
+            )
+            value = await middleware.atool(
+                request, lambda req: req.tool.ainvoke(req.arguments, req.config)
+            )
+            succeeded = True
+        except GraphInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001 - tool failures are observations
+            any_failed = True
+            debug.emit("ERROR", error=str(exc))
+            value = f"Error: {exc}"
+        finally:
+            if previous_call_id is None:
+                execution.metadata.pop("current_tool_call_id", None)
+            else:
+                execution.metadata["current_tool_call_id"] = previous_call_id
+        if succeeded:
+            loaded, skill_state, active = self._skill_state_after(
+                call,
+                loaded,
+                skill_state,
+                registry,
+                business_tool_names,
+                int(state.get("session_turn", 1)),
+            )
+        debug.emit("TOOL RESULT", name=call["name"], result=value)
+        if call["name"] in subagent_names:
+            debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
+        next_index = index + 1
         return {
-            "messages": results,
+            "messages": [self._result(call, value)],
             "loaded_skills": loaded,
             "active_skill": active,
             "skill_state": skill_state,
             "step_failed": bool(state.get("step_failed")) or any_failed,
+            "pending_tool_calls": calls if next_index < len(calls) else [],
+            "tool_call_index": next_index if next_index < len(calls) else 0,
         }
 
     @staticmethod

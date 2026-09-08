@@ -112,9 +112,50 @@ class AgentContextManager:
                 f"- {key}: {value}" for key, value in business_context.items()
             )
             sections.append("Business runtime context:\n" + rendered)
-        source = state.get("summarized_messages") or state.get("messages", [])
-        messages = self._bounded_tool_results(list(source))
+        messages = self._bounded_tool_results(self._current_messages(state))
         return [SystemMessage(content="\n\n".join(filter(None, sections))), *messages]
+
+    @staticmethod
+    def _current_messages(state: Mapping[str, Any]) -> list[Any]:
+        """Return the compacted history followed by everything added since it.
+
+        ``summarized_messages`` is a snapshot produced by LangMem, while
+        ``messages`` keeps growing through the graph message reducer.  Treating
+        the snapshot as the whole history would hide later model/tool messages.
+        """
+        history = list(state.get("messages", []))
+        compacted = list(state.get("summarized_messages", []))
+        if not compacted:
+            return history
+
+        history_by_id = {
+            message.id: index
+            for index, message in enumerate(history)
+            if getattr(message, "id", None) is not None
+        }
+        represented = [
+            history_by_id[message.id]
+            for message in compacted
+            if getattr(message, "id", None) in history_by_id
+        ]
+        if represented:
+            return [*compacted, *history[max(represented) + 1 :]]
+
+        # Messages normally have reducer-assigned IDs.  Equality is a safe
+        # fallback for direct ContextManager use with manually-created messages.
+        for compacted_message in reversed(compacted):
+            for index in range(len(history) - 1, -1, -1):
+                if (
+                    compacted_message is history[index]
+                    or compacted_message == history[index]
+                ):
+                    return [*compacted, *history[index + 1 :]]
+
+        running_summary = dict(state.get("context", {})).get("running_summary")
+        last_id = getattr(running_summary, "last_summarized_message_id", None)
+        if last_id in history_by_id:
+            return [*compacted, *history[history_by_id[last_id] + 1 :]]
+        return compacted
 
     def _bounded_tool_results(self, messages: list[Any]) -> list[Any]:
         tool_positions = [

@@ -325,7 +325,7 @@ class SkillRegistry:
         self._by_name.setdefault(skill.name, []).append(skill)
 
     def get(self, reference: str) -> Skill:
-        if reference in self._skills:
+        if "@" in reference and reference in self._skills:
             return self._skills[reference]
         candidates = self._by_name.get(reference, [])
         if not candidates:
@@ -339,10 +339,14 @@ class SkillRegistry:
     @staticmethod
     def _version_key(version: str | None) -> tuple[Any, ...]:
         if version is None:
-            return (0,)
+            return (0, ())
         parts = re.split(r"([0-9]+)", version)
-        return tuple(
-            (1, int(part)) if part.isdigit() else (0, part.lower()) for part in parts
+        return (
+            1,
+            tuple(
+                (1, int(part)) if part.isdigit() else (0, part.lower())
+                for part in parts
+            ),
         )
 
     def list(self) -> tuple[Skill, ...]:

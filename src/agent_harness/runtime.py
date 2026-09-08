@@ -103,7 +103,10 @@ class AgentRuntime:
         configurable["thread_id"] = thread_id
         merged["configurable"] = configurable
         merged.setdefault(
-            "recursion_limit", self.definition.runtime_config.max_iterations * 3 + 8
+            "recursion_limit",
+            self.definition.runtime_config.max_iterations * 4
+            + self.definition.runtime_config.call_limit
+            + 16,
         )
         return merged, thread_id, public_id
 
@@ -357,6 +360,28 @@ class AgentRuntime:
     def _completed(self, config: RunnableConfig) -> bool:
         """A checkpoint with a pending node is paused (including HITL), not complete."""
         return not tuple(self.graph.get_state(config).next)
+
+    @staticmethod
+    def _snapshot_interrupts(snapshot: Any) -> list[Any]:
+        return [
+            interrupt.value
+            for task in getattr(snapshot, "tasks", ())
+            for interrupt in getattr(task, "interrupts", ())
+        ]
+
+    def pending_interrupts(self, *, session_id: str) -> list[Any]:
+        config, _, _ = self._config(None, session_id)
+        return self._snapshot_interrupts(self.graph.get_state(config))
+
+    async def apending_interrupts(self, *, session_id: str) -> list[Any]:
+        config, _, _ = self._config(None, session_id)
+        return self._snapshot_interrupts(await self.graph.aget_state(config))
+
+    def is_paused(self, *, session_id: str) -> bool:
+        return bool(self.pending_interrupts(session_id=session_id))
+
+    async def ais_paused(self, *, session_id: str) -> bool:
+        return bool(await self.apending_interrupts(session_id=session_id))
 
     @staticmethod
     def _decision(decision: str | Mapping[str, Any]) -> dict[str, Any]:
