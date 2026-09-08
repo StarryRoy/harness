@@ -160,6 +160,18 @@ MCP 不使用专属 runtime。安装 `agent-harness[mcp]` 后，调用异步
 `load_mcp_tools(server_config)`，并把得到的标准 `BaseTool` 列表传入 `tools=`，即可
 自动获得现有 Middleware、HITL、Debug 和调用上限能力。
 
+## 错误边界
+
+Harness 在应用边界提供稳定的 `AgentError` 子类。Model、Session、Memory、HITL、MCP
+以及 Strategy 错误会保留原始异常为 `cause`；Middleware 的 before/after hook 错误包装为
+`MiddlewareError`，未知 Tool 包装为 `ToolError`。普通 Tool 的可恢复执行失败仍作为
+observation 写回模型，使 Agent 可以自行修正；SubAgent 为保持隔离不会向 Main Agent 抛出
+内部异常，而是在结果中返回 `status="error"`、`error` 及
+`metadata.error_type="SubAgentError"`。
+
+HITL resume 会重新进入同一 Middleware agent 生命周期；无论普通调用还是 resume，
+`after_agent` 每次执行最多调用一次，避免 hook 自身失败时重复产生副作用。
+
 ## Advanced Skills
 
 Skill 目录示例：

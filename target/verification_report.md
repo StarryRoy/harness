@@ -8,7 +8,7 @@
 
 从静态实现看，三个阶段要求的主要 API 和扩展点大多已经存在；但是三个目标都把
 “真实/完整/人工跑通”列为验收条件，而仓库目前只有 fallback 与长期记忆边界的 8 个
-单元测试，没有覆盖 ReAct、Tool Loop、Skill、SubAgent、Session、Middleware、
+单元测试原先没有覆盖 ReAct、Tool Loop、Skill、SubAgent、Session、Middleware、
 PlanExecute、Structured Output、HITL、MCP、Guardrail 等验收链路。本次环境又无法从
 包索引安装 LangChain/LangGraph/LangMem 依赖，所以现有测试在收集阶段即停止，无法用
 动态证据确认这些链路可运行。
@@ -17,7 +17,7 @@ PlanExecute、Structured Output、HITL、MCP、Guardrail 等验收链路。本�
 | --- | --- | --- | --- |
 | Phase 1 | 核心对象、ReAct 图、Tool Loop、Skill progressive disclosure、四种调用接口均可定位 | 四个规定场景均无自动化或人工运行记录 | **未完全达标（待动态验收）** |
 | Phase 2 | SubAgent as Tool、Middleware、Session、业务 State、Skills Advanced 均可定位 | SubAgent/Session/Middleware/Skills Advanced 场景均未运行 | **未完全达标（待动态验收）** |
-| Phase 3 | PlanExecute、Structured Output、LangMem/Store、HITL、Guardrail、Fallback、MCP、异常类均可定位 | 仅 fallback 顺序和 memory adapter 有单元测试；其余端到端场景未运行，统一异常模型也仅部分接线 | **未达标** |
+| Phase 3 | PlanExecute、Structured Output、LangMem/Store、HITL、Guardrail、Fallback、MCP、异常类均可定位 | fallback、memory adapter 与 Middleware 错误边界有单元测试；其余端到端场景未运行 | **未达标** |
 
 ## 验收方法与结果
 
@@ -27,7 +27,7 @@ PlanExecute、Structured Output、HITL、MCP、Guardrail 等验收链路。本�
 2. `ruff check src tests`：通过（`All checks passed!`）。
 3. `pytest -q`：失败于测试收集，`langchain_core` 未安装；0 个测试得到执行。
 4. `python -m pip install -r requirements.txt`：环境访问包索引返回 `403 Forbidden`，无法补齐依赖。
-5. 静态阅读 `src/agent_harness/` 全部 15 个模块、3 个目标文件及现有 2 个测试文件。
+5. 静态阅读 `src/agent_harness/` 全部 15 个模块、3 个目标文件及测试文件。
 
 > 编译与 lint 只能证明语法和静态风格，不等价于目标文件要求的运行验收。
 
@@ -81,21 +81,20 @@ PlanExecute、Structured Output、HITL、MCP、Guardrail 等验收链路。本�
   `create_memory_store_manager()`，namespace 默认按 agent + memory_id 隔离。
 - HITL 使用 LangGraph `interrupt()` / `Command(resume=...)`，支持 approve/reject/edit。
 - Guardrail、fallback 和 MCP adapter 都进入现有 Middleware/Tool runtime，没有第二套 runtime。
-- 公共异常层次列出了目标要求的 10 种异常，并为 Model、Memory、MCP、HITL 等路径保留 cause。
+- 公共异常层次列出了目标要求的 10 种异常，并为 Model、Tool、SubAgent、Middleware、Memory、
+  MCP、HITL 等边界保留 cause；SubAgent 的隔离结果同时提供稳定的 `error_type` metadata。
+- HITL resume 现在和普通 invoke 一样执行 `before_agent` / `after_agent` Middleware 生命周期。
 
 ### 未满足/未证明
 
 1. **绝大多数强制人工验收链路没有证据。** PlanExecute、replan、structured output、摘要、
    cross-session memory、HITL 三种决策、ReAct/PlanExecute 恢复、MCP、三类 guardrail 均无测试。
-2. **统一异常模型只部分接线。** `ToolError`、`SubAgentError`、`MiddlewareError` 仅定义/导出，
-   实际执行路径没有抛出它们；SubAgent 捕获任意异常后只返回字符串，工具异常也通常转成
-   observation。可恢复 Tool error 转 observation 符合目标，但不可恢复/边界错误仍缺少稳定的
-   对应类型证明。
-3. **现有测试范围不足。** `tests/test_fallback_order.py` 只检查 fallback 在 primary retry 耗尽后
+2. **现有测试范围不足。** `tests/test_fallback_order.py` 只检查 fallback 在 primary retry 耗尽后
    执行以及 fallback 的 tool/structured binding；`tests/test_memory.py` 只检查 LangMem manager
-   参数和 namespace 隔离，不是目标描述的完整跨 session 对话流程。
+   参数和 namespace 隔离；新增的错误边界测试只验证 Middleware 同步/异步 hook 的稳定异常，
+   都不是目标描述的完整端到端流程。
 
-**判定：未达标。主要阻塞是缺少端到端验收，其次是统一异常模型接线不完整。**
+**判定：未达标。主要阻塞是缺少端到端验收。**
 
 ## 达标所需最小补充
 
@@ -105,6 +104,4 @@ PlanExecute、Structured Output、HITL、MCP、Guardrail 等验收链路。本�
 3. 增加 Phase 3 集成测试：PlanExecute 正常/replan/max bound、ReAct 与 PlanExecute structured output、
    LangMem summarization、cross-session memory、HITL approve/reject/edit + resume、Guardrail、MCP tool
    runtime、fallback sync/async。
-4. 明确不可恢复的 Tool/SubAgent/Middleware 边界，并把声明的统一异常类型接入这些边界，同时保留
-   可恢复 Tool 错误作为 observation 的现有行为。
-5. 在可安装依赖的环境运行完整测试，并保存人工验收命令、输入、关键输出和通过结论。
+4. 在可安装依赖的环境运行完整测试，并保存人工验收命令、输入、关键输出和通过结论。

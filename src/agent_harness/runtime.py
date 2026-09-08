@@ -111,9 +111,11 @@ class AgentRuntime:
         self.debug.emit("SESSION", session_id=public_id or "ephemeral")
         self.debug.emit("AGENT START", name=self.definition.name)
         with self.middleware.execution_scope(execution):
+            after_called = False
             try:
                 self.middleware.before_agent(execution)
                 result = self.graph.invoke(state, graph_config)
+                after_called = True
                 result = self.middleware.after_agent(execution, result)
                 if self._completed(graph_config):
                     self._update_memory(result, memory_id)
@@ -121,7 +123,8 @@ class AgentRuntime:
             except Exception as exc:
                 execution.error = exc
                 self.debug.emit("ERROR", error=str(exc))
-                self.middleware.after_agent(execution, None)
+                if not after_called:
+                    self.middleware.after_agent(execution, None)
                 if isinstance(exc, AgentError):
                     raise
                 raise SessionError("Agent invocation failed", cause=exc) from exc
@@ -147,9 +150,11 @@ class AgentRuntime:
         self.debug.emit("SESSION", session_id=public_id or "ephemeral")
         self.debug.emit("AGENT START", name=self.definition.name)
         with self.middleware.execution_scope(execution):
+            after_called = False
             try:
                 await self.middleware.abefore_agent(execution)
                 result = await self.graph.ainvoke(state, graph_config)
+                after_called = True
                 result = await self.middleware.aafter_agent(execution, result)
                 if self._completed(graph_config):
                     await self._aupdate_memory(result, memory_id)
@@ -157,7 +162,8 @@ class AgentRuntime:
             except Exception as exc:
                 execution.error = exc
                 self.debug.emit("ERROR", error=str(exc))
-                await self.middleware.aafter_agent(execution, None)
+                if not after_called:
+                    await self.middleware.aafter_agent(execution, None)
                 if isinstance(exc, AgentError):
                     raise
                 raise SessionError("Async agent invocation failed", cause=exc) from exc
@@ -187,18 +193,21 @@ class AgentRuntime:
             self.debug.emit("SESSION", session_id=public_id or "ephemeral")
             self.debug.emit("AGENT START", name=self.definition.name)
             with self.middleware.execution_scope(execution):
+                after_called = False
                 try:
                     self.middleware.before_agent(execution)
                     for result in self.graph.stream(state, graph_config, **kwargs):
                         yield result
                     final = dict(self.graph.get_state(graph_config).values)
+                    after_called = True
                     final = self.middleware.after_agent(execution, final)
                     if self._completed(graph_config):
                         self._update_memory(final, memory_id)
                 except Exception as exc:
                     execution.error = exc
                     self.debug.emit("ERROR", error=str(exc))
-                    self.middleware.after_agent(execution, None)
+                    if not after_called:
+                        self.middleware.after_agent(execution, None)
                     if isinstance(exc, AgentError):
                         raise
                     raise SessionError("Agent stream failed", cause=exc) from exc
@@ -230,18 +239,21 @@ class AgentRuntime:
             self.debug.emit("SESSION", session_id=public_id or "ephemeral")
             self.debug.emit("AGENT START", name=self.definition.name)
             with self.middleware.execution_scope(execution):
+                after_called = False
                 try:
                     await self.middleware.abefore_agent(execution)
                     async for result in self.graph.astream(state, graph_config, **kwargs):
                         yield result
                     final = dict((await self.graph.aget_state(graph_config)).values)
+                    after_called = True
                     final = await self.middleware.aafter_agent(execution, final)
                     if self._completed(graph_config):
                         await self._aupdate_memory(final, memory_id)
                 except Exception as exc:
                     execution.error = exc
                     self.debug.emit("ERROR", error=str(exc))
-                    await self.middleware.aafter_agent(execution, None)
+                    if not after_called:
+                        await self.middleware.aafter_agent(execution, None)
                     if isinstance(exc, AgentError):
                         raise
                     raise SessionError("Async agent stream failed", cause=exc) from exc
@@ -303,12 +315,19 @@ class AgentRuntime:
                                    dict(metadata.get("business_context", {})), {"thread_id": thread_id})
         self.debug.emit("HITL RESUME", decision=decision)
         with self.middleware.execution_scope(execution):
+            after_called = False
             try:
+                self.middleware.before_agent(execution)
                 result = self.graph.invoke(Command(resume=self._decision(decision)), config)
+                after_called = True
+                result = self.middleware.after_agent(execution, result)
                 if self._completed(config):
                     self._update_memory(result, memory_id)
                 return result
             except Exception as exc:
+                execution.error = exc
+                if not after_called:
+                    self.middleware.after_agent(execution, None)
                 if isinstance(exc, AgentError):
                     raise
                 raise HITLError("Unable to resume interrupted agent", cause=exc) from exc
@@ -324,12 +343,19 @@ class AgentRuntime:
                                    dict(metadata.get("business_context", {})), {"thread_id": thread_id})
         self.debug.emit("HITL RESUME", decision=decision)
         with self.middleware.execution_scope(execution):
+            after_called = False
             try:
+                await self.middleware.abefore_agent(execution)
                 result = await self.graph.ainvoke(Command(resume=self._decision(decision)), config)
+                after_called = True
+                result = await self.middleware.aafter_agent(execution, result)
                 if self._completed(config):
                     await self._aupdate_memory(result, memory_id)
                 return result
             except Exception as exc:
+                execution.error = exc
+                if not after_called:
+                    await self.middleware.aafter_agent(execution, None)
                 if isinstance(exc, AgentError):
                     raise
                 raise HITLError("Unable to resume interrupted agent", cause=exc) from exc

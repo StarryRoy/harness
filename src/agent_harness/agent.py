@@ -11,6 +11,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 
 from .definition import AgentDefinition
+from .errors import SubAgentError
 from .runtime import AgentRuntime
 
 
@@ -114,10 +115,16 @@ class Agent:
                 state = self.invoke(task)
                 result = self._subagent_result(state)
             except Exception as exc:  # noqa: BLE001 - errors become isolated tool results
+                error = SubAgentError(
+                    f"SubAgent '{self.definition.name}' invocation failed", cause=exc
+                )
                 result = SubAgentResult(
                     status="error",
-                    metadata={"agent": self.definition.name},
-                    error=str(exc),
+                    metadata={
+                        "agent": self.definition.name,
+                        "error_type": type(error).__name__,
+                    },
+                    error=str(error),
                 )
             self.runtime.debug.emit(
                 "SUBAGENT RESULT", name=self.definition.name, status=result.status
@@ -131,10 +138,16 @@ class Agent:
                 state = await self.ainvoke(task)
                 result = self._subagent_result(state)
             except Exception as exc:  # noqa: BLE001 - errors become isolated tool results
+                error = SubAgentError(
+                    f"SubAgent '{self.definition.name}' invocation failed", cause=exc
+                )
                 result = SubAgentResult(
                     status="error",
-                    metadata={"agent": self.definition.name},
-                    error=str(exc),
+                    metadata={
+                        "agent": self.definition.name,
+                        "error_type": type(error).__name__,
+                    },
+                    error=str(error),
                 )
             self.runtime.debug.emit(
                 "SUBAGENT RESULT", name=self.definition.name, status=result.status
