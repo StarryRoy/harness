@@ -94,6 +94,7 @@ config = RuntimeConfig(
     call_limit=48,
     context_policy=ContextPolicy(
         summary_threshold=40,
+        summary_token_threshold=6000,
         summary_keep_recent=12,
         skill_retention_turns=2,
     ),
@@ -121,8 +122,9 @@ state = agent.invoke(
 `skill_state`、`session_turn`、`summary` 和 `structured_response` 是保留字段，业务
 Schema 不能覆盖。`context` 是单次执行的业务 Runtime Context，不写入会话 State。
 
-长会话达到阈值后由当前模型摘要旧消息，保存 `summary` 并保留最近消息。旧 Tool
-Result 在模型上下文中会先被省略或截断，不会无限堆积。
+长会话达到消息或 token 阈值后，由 LangMem `SummarizationNode` 压缩旧消息并保留
+近期上下文；Harness 只提供默认阈值和接线。旧 Tool Result 在模型上下文中会先被
+省略或截断，不会无限堆积。
 
 ## Plan & Execute、长期记忆与 HITL
 
@@ -130,9 +132,10 @@ Result 在模型上下文中会先被省略或截断，不会无限堆积。
 `strategy=PlanExecuteStrategy(max_steps=8, max_replans=2)`。Planner 使用模型原生
 `with_structured_output()` 生成有界计划，执行阶段继续复用相同 Tool、Skill、
 SubAgent、Middleware、Session 与 Checkpoint runtime，结果 state 的 `plan` 包含
-`steps`、`current_step`、`status` 和 `replan_count`。
+`steps`、`current_step`、`status` 和 `replan_count`。步骤失败或结果明显不足时只重排
+未完成步骤；已完成步骤及结果保持不变，并受 `max_replans` / `max_steps` 限制。
 
-安装 `agent-harness[memory]` 后，通过 `memory=True` 启用基于 LangGraph Store 和
+通过 `memory=True` 启用基于 LangGraph Store 和
 LangMem manager 的跨会话记忆。开发默认使用 `InMemoryStore`，生产可传 `store=`；
 应用只需在调用时同时提供稳定的 `memory_id`：
 

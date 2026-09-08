@@ -10,11 +10,12 @@ requires-python = ">=3.10"
 dependencies = [
   "langchain-core>=0.3.30,<2",
   "langgraph>=0.2.60,<2",
+  "langmem>=0.0.29,<1",
   "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]
-memory = ["langmem>=0.0.29,<1"]
+memory = []
 mcp = ["langchain-mcp-adapters>=0.1,<1"]
 enterprise = ["langmem>=0.0.29,<1", "langchain-mcp-adapters>=0.1,<1"]
 

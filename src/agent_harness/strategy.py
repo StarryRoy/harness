@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
@@ -17,6 +17,7 @@ from langgraph.types import interrupt
 from .context import AgentContextManager
 from .debug import DebugHandler
 from .definition import AgentDefinition
+from .errors import ModelError
 from .middleware import MiddlewarePipeline, ModelRequest, ToolRequest
 from .skills import SkillError, SkillRegistry, SkillScriptRunner
 from .state import compose_state_schema
@@ -39,10 +40,10 @@ class AgentStrategy(ABC):
         """Return a compiled LangGraph runnable."""
 
 
-class ReActStrategy(AgentStrategy):
-    """Standard model -> tools -> model loop with centralized context."""
+class _ExecutionStrategySupport:
+    """Shared graph execution plumbing; it is not a public strategy."""
 
-    def build_graph(
+    def _build_graph(
         self,
         definition: AgentDefinition,
         skills: SkillRegistry,
@@ -52,7 +53,7 @@ class ReActStrategy(AgentStrategy):
         middleware: MiddlewarePipeline,
         checkpointer: Any = None,
     ) -> Any:
-        planning = isinstance(self, PlanExecuteStrategy)
+        planning = bool(getattr(self, "_planning", False))
         business_tools = {tool.name: tool for tool in definition.tools}
         internal_tools = self._skill_tools(
             skills,
@@ -83,7 +84,7 @@ class ReActStrategy(AgentStrategy):
                 if plan.get("status") == "synthesizing":
                     directive = "Synthesize the completed plan results into the final answer."
                 elif current < len(steps):
-                    directive += f"\nCurrent step: {steps[current]}"
+                    directive += f"\nCurrent step: {steps[current]['description']}"
                 messages.insert(1, SystemMessage(content=directive))
             return messages
 
@@ -101,9 +102,19 @@ class ReActStrategy(AgentStrategy):
             purpose: str,
         ) -> Any:
             request = ModelRequest(
-                middleware.current_execution(), state, messages, config, purpose=purpose
+                middleware.current_execution(), state, messages, config, purpose=purpose,
+                tools=tuple(all_tools) if purpose == "agent" else (),
+                response_format=(
+                    _PlanOutput if purpose in {"planner", "replanner"}
+                    else definition.response_format if purpose == "format" else None
+                ),
             )
-            return middleware.model(request, lambda req: target.invoke(req.messages, req.config))
+            try:
+                return middleware.model(request, lambda req: target.invoke(req.messages, req.config))
+            except ModelError:
+                raise
+            except Exception as exc:
+                raise ModelError(f"Model call failed ({purpose})", cause=exc) from exc
 
         async def acall_model(
             target: Any,
@@ -113,11 +124,21 @@ class ReActStrategy(AgentStrategy):
             purpose: str,
         ) -> Any:
             request = ModelRequest(
-                middleware.current_execution(), state, messages, config, purpose=purpose
+                middleware.current_execution(), state, messages, config, purpose=purpose,
+                tools=tuple(all_tools) if purpose == "agent" else (),
+                response_format=(
+                    _PlanOutput if purpose in {"planner", "replanner"}
+                    else definition.response_format if purpose == "format" else None
+                ),
             )
-            return await middleware.amodel(
-                request, lambda req: target.ainvoke(req.messages, req.config)
-            )
+            try:
+                return await middleware.amodel(
+                    request, lambda req: target.ainvoke(req.messages, req.config)
+                )
+            except ModelError:
+                raise
+            except Exception as exc:
+                raise ModelError(f"Async model call failed ({purpose})", cause=exc) from exc
 
         def model_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
             iteration = int(state.get("iteration", 0)) + 1
@@ -133,27 +154,24 @@ class ReActStrategy(AgentStrategy):
             response = await acall_model(model, state, config, prompt(state), "agent")
             return {"messages": [response], "iteration": iteration}
 
-        def summarize_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
-            old, _ = context.split_for_summary(state)
-            if not old:
-                return {}
-            messages = context.summary_prompt(state.get("summary"), old)
-            response = call_model(definition.model, state, config, messages, "summary")
-            removals = [RemoveMessage(id=item.id) for item in old if item.id]
-            return {"summary": str(response.content), "messages": removals}
+        try:
+            from langmem.short_term import SummarizationNode
+            from langchain_core.messages.utils import count_tokens_approximately
+        except ImportError as exc:
+            from .errors import MemoryError
+            raise MemoryError(
+                "Short-term summarization requires the 'langmem' package", cause=exc
+            ) from exc
+        summarizer = SummarizationNode(
+            token_counter=count_tokens_approximately,
+            model=definition.model,
+            max_tokens=context.policy.summary_token_threshold
+            + max(context.policy.summary_keep_recent * 256, 512),
+            max_tokens_before_summary=context.policy.summary_token_threshold,
+            max_summary_tokens=max(context.policy.summary_keep_recent * 64, 128),
+        )
 
-        async def async_summarize_node(
-            state: Mapping[str, Any], config: RunnableConfig
-        ) -> dict[str, Any]:
-            old, _ = context.split_for_summary(state)
-            if not old:
-                return {}
-            messages = context.summary_prompt(state.get("summary"), old)
-            response = await acall_model(definition.model, state, config, messages, "summary")
-            removals = [RemoveMessage(id=item.id) for item in old if item.id]
-            return {"summary": str(response.content), "messages": removals}
-
-        def route(state: Mapping[str, Any]) -> Literal["tools", "advance", "finalize", "format", "done"]:
+        def route(state: Mapping[str, Any]) -> Literal["tools", "replan", "advance", "finalize", "format", "done"]:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
                 if int(state.get("iteration", 0)) >= definition.runtime_config.max_iterations:
@@ -162,6 +180,11 @@ class ReActStrategy(AgentStrategy):
                     )
                 return "tools"
             if planning and state.get("plan", {}).get("status") not in {"synthesizing", "completed"}:
+                plan = state["plan"]
+                content = str(getattr(message, "content", "")).strip().lower()
+                inadequate = bool(state.get("step_failed")) or not content or content.startswith("error:")
+                if inadequate and int(plan.get("replan_count", 0)) < self.max_replans:
+                    return "replan"
                 return "advance"
             if planning:
                 return "finalize"
@@ -179,7 +202,7 @@ class ReActStrategy(AgentStrategy):
             if index >= len(steps):
                 plan["status"] = "synthesizing"
             debug.emit("PLAN STEP", current_step=index, status=plan["status"])
-            return {"plan": plan}
+            return {"plan": plan, "step_failed": False}
 
         def tool_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
             return self._execute_tools(
@@ -209,7 +232,7 @@ class ReActStrategy(AgentStrategy):
 
         graph = StateGraph(compose_state_schema(definition.state_schema))
         graph.add_node("prepare", prepare_node)
-        graph.add_node("summarize", RunnableLambda(summarize_node, async_summarize_node))
+        graph.add_node("summarize", summarizer)
         graph.add_node("model", RunnableLambda(model_node, async_model_node))
         graph.add_node("tools", RunnableLambda(tool_node, async_tool_node))
         if planning:
@@ -244,6 +267,35 @@ class ReActStrategy(AgentStrategy):
             graph.add_edge("planner", "prepare")
             graph.add_node("advance", advance_node)
             graph.add_edge("advance", "model")
+
+            def replan_node(state: Mapping[str, Any], config: RunnableConfig) -> dict[str, Any]:
+                plan = dict(state["plan"])
+                completed = [dict(step) for step in plan["steps"][: int(plan["current_step"])]]
+                remaining_limit = self.max_steps - len(completed)
+                request = [
+                    *context.build_messages(state, middleware.current_execution().business_context),
+                    AIMessage(content=(
+                        "Revise only the unfinished portion of the plan. Preserve completed work. "
+                        f"Return 1..{remaining_limit} remaining concrete steps. "
+                        f"Completed steps and results: {completed}. Failed step: "
+                        f"{plan['steps'][int(plan['current_step'])]}."
+                    )),
+                ]
+                value = call_model(planner, state, config, request, "replanner")
+                raw = value.get("steps", []) if isinstance(value, Mapping) else value.steps
+                descriptions = [item.get("description", str(item)) if isinstance(item, Mapping) else str(item) for item in raw]
+                if not descriptions or len(descriptions) > remaining_limit:
+                    raise ValueError(f"Re-planner must return 1..{remaining_limit} steps")
+                remaining = [{"step_id": str(len(completed) + i + 1), "description": item,
+                              "status": "pending", "result": None}
+                             for i, item in enumerate(descriptions)]
+                plan.update(steps=[*completed, *remaining], current_step=len(completed),
+                            status="executing", replan_count=int(plan["replan_count"]) + 1)
+                debug.emit("REPLAN", plan=plan, replan_count=plan["replan_count"])
+                return {"plan": plan, "step_failed": False}
+
+            graph.add_node("replan", replan_node)
+            graph.add_edge("replan", "model")
         else:
             graph.add_edge(START, "prepare")
         graph.add_conditional_edges(
@@ -253,6 +305,7 @@ class ReActStrategy(AgentStrategy):
         destinations: dict[str, Any] = {"tools": "tools", "done": END}
         if planning:
             destinations["advance"] = "advance"
+            destinations["replan"] = "replan"
             destinations["finalize"] = "finalize"
         if definition.response_format is not None:
             destinations["format"] = "format"
@@ -407,12 +460,15 @@ class ReActStrategy(AgentStrategy):
         skill_state = dict(state.get("skill_state", {}))
         active = state.get("active_skill")
         results = []
+        any_failed = False
         for call in calls:
             if call["name"] not in tools:
                 raise ValueError(f"Model requested unknown tool: {call['name']}")
             if call["name"] in subagent_names:
                 debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
             debug.emit("TOOL CALL", name=call["name"])
+            if "mcp" in type(tools[call["name"]]).__module__.lower() or (tools[call["name"]].metadata or {}).get("mcp"):
+                debug.emit("MCP TOOL", name=call["name"])
             succeeded = False
             try:
                 self._require_loaded(call, loaded, registry)
@@ -431,6 +487,7 @@ class ReActStrategy(AgentStrategy):
             except GraphInterrupt:
                 raise
             except Exception as exc:  # noqa: BLE001 - tool failures are observations
+                any_failed = True
                 debug.emit("ERROR", error=str(exc))
                 value = f"Error: {exc}"
             if succeeded:
@@ -451,6 +508,7 @@ class ReActStrategy(AgentStrategy):
             "loaded_skills": loaded,
             "active_skill": active,
             "skill_state": skill_state,
+            "step_failed": bool(state.get("step_failed")) or any_failed,
         }
 
     async def _aexecute_tools(
@@ -469,12 +527,15 @@ class ReActStrategy(AgentStrategy):
         skill_state = dict(state.get("skill_state", {}))
         active = state.get("active_skill")
         results = []
+        any_failed = False
         for call in calls:
             if call["name"] not in tools:
                 raise ValueError(f"Model requested unknown tool: {call['name']}")
             if call["name"] in subagent_names:
                 debug.emit("SUBAGENT CALL", name=call["name"], task=call["args"].get("task"))
             debug.emit("TOOL CALL", name=call["name"])
+            if "mcp" in type(tools[call["name"]]).__module__.lower() or (tools[call["name"]].metadata or {}).get("mcp"):
+                debug.emit("MCP TOOL", name=call["name"])
             succeeded = False
             try:
                 self._require_loaded(call, loaded, registry)
@@ -493,6 +554,7 @@ class ReActStrategy(AgentStrategy):
             except GraphInterrupt:
                 raise
             except Exception as exc:  # noqa: BLE001 - tool failures are observations
+                any_failed = True
                 debug.emit("ERROR", error=str(exc))
                 value = f"Error: {exc}"
             if succeeded:
@@ -513,6 +575,7 @@ class ReActStrategy(AgentStrategy):
             "loaded_skills": loaded,
             "active_skill": active,
             "skill_state": skill_state,
+            "step_failed": bool(state.get("step_failed")) or any_failed,
         }
 
     @staticmethod
@@ -543,10 +606,24 @@ class _PlanOutput(TypedDict):
     steps: list[dict[str, str]]
 
 
-class PlanExecuteStrategy(ReActStrategy):
-    """A bounded planner followed by the existing ReAct tool/runtime loop."""
+class ReActStrategy(_ExecutionStrategySupport, AgentStrategy):
+    """Standard model -> tools -> model loop with centralized context."""
+
+    _planning = False
+
+    def build_graph(self, *args: Any, **kwargs: Any) -> Any:
+        return self._build_graph(*args, **kwargs)
+
+
+class PlanExecuteStrategy(_ExecutionStrategySupport, AgentStrategy):
+    """A bounded planner followed by the common execution runtime."""
+
+    _planning = True
 
     def __init__(self, *, max_steps: int = 8, max_replans: int = 2) -> None:
         if max_steps < 1 or max_replans < 0:
             raise ValueError("max_steps must be positive and max_replans non-negative")
         self.max_steps, self.max_replans = max_steps, max_replans
+
+    def build_graph(self, *args: Any, **kwargs: Any) -> Any:
+        return self._build_graph(*args, **kwargs)

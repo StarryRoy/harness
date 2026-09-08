@@ -16,6 +16,9 @@ async def load_mcp_tools(servers: Mapping[str, Mapping[str, Any]]) -> list[Any]:
             "MCP tools require the optional 'langchain-mcp-adapters' package", cause=exc
         ) from exc
     try:
-        return list(await MultiServerMCPClient(dict(servers)).get_tools())
+        tools = list(await MultiServerMCPClient(dict(servers)).get_tools())
+        for tool in tools:
+            tool.metadata = {**(tool.metadata or {}), "mcp": True}
+        return tools
     except Exception as exc:
         raise MCPError("Unable to load MCP tools", cause=exc) from exc
