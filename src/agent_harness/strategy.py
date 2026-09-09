@@ -19,6 +19,7 @@ from .debug import DebugHandler
 from .definition import AgentDefinition
 from .errors import AgentError, ModelError, ToolError
 from .middleware import MiddlewarePipeline, ModelRequest, ToolRequest
+from .observability import EventType
 from .skills import SkillError, SkillRegistry, SkillScriptRunner
 from .state import compose_state_schema
 
@@ -173,7 +174,6 @@ class _ExecutionStrategySupport:
             state: Mapping[str, Any], config: RunnableConfig
         ) -> dict[str, Any]:
             iteration = int(state.get("iteration", 0)) + 1
-            debug.emit("MODEL CALL", iteration=iteration)
             response = call_model(model, state, config, prompt(state), "agent")
             return {"messages": [response], "iteration": iteration}
 
@@ -181,7 +181,6 @@ class _ExecutionStrategySupport:
             state: Mapping[str, Any], config: RunnableConfig
         ) -> dict[str, Any]:
             iteration = int(state.get("iteration", 0)) + 1
-            debug.emit("MODEL CALL", iteration=iteration)
             response = await acall_model(model, state, config, prompt(state), "agent")
             return {"messages": [response], "iteration": iteration}
 
@@ -245,14 +244,23 @@ class _ExecutionStrategySupport:
 
         def summarize_node(state: Mapping[str, Any]) -> dict[str, Any]:
             messages, summary_context, running_summary, threshold = summary_input(state)
-            result = summarize_messages(
-                messages,
-                running_summary=running_summary,
-                model=definition.model,
-                max_tokens=summary_max_tokens,
-                max_tokens_before_summary=threshold,
-                max_summary_tokens=summary_max_summary_tokens,
-                token_counter=count_tokens_approximately,
+            with (
+                debug.span("context.summarize", message_count=len(messages)),
+                debug.span("model", purpose="summary"),
+            ):
+                result = summarize_messages(
+                    messages,
+                    running_summary=running_summary,
+                    model=definition.model,
+                    max_tokens=summary_max_tokens,
+                    max_tokens_before_summary=threshold,
+                    max_summary_tokens=summary_max_summary_tokens,
+                    token_counter=count_tokens_approximately,
+                )
+            debug.emit(
+                EventType.CONTEXT_SUMMARIZE,
+                status="success",
+                metadata={"message_count": len(messages)},
             )
             return summary_update(result, summary_context)
 
@@ -260,14 +268,23 @@ class _ExecutionStrategySupport:
             state: Mapping[str, Any],
         ) -> dict[str, Any]:
             messages, summary_context, running_summary, threshold = summary_input(state)
-            result = await asummarize_messages(
-                messages,
-                running_summary=running_summary,
-                model=definition.model,
-                max_tokens=summary_max_tokens,
-                max_tokens_before_summary=threshold,
-                max_summary_tokens=summary_max_summary_tokens,
-                token_counter=count_tokens_approximately,
+            with (
+                debug.span("context.summarize", message_count=len(messages)),
+                debug.span("model", purpose="summary"),
+            ):
+                result = await asummarize_messages(
+                    messages,
+                    running_summary=running_summary,
+                    model=definition.model,
+                    max_tokens=summary_max_tokens,
+                    max_tokens_before_summary=threshold,
+                    max_summary_tokens=summary_max_summary_tokens,
+                    token_counter=count_tokens_approximately,
+                )
+            debug.emit(
+                EventType.CONTEXT_SUMMARIZE,
+                status="success",
+                metadata={"message_count": len(messages)},
             )
             return summary_update(result, summary_context)
 
@@ -319,7 +336,11 @@ class _ExecutionStrategySupport:
             plan.update(steps=steps, current_step=index)
             if index >= len(steps):
                 plan["status"] = "synthesizing"
-            debug.emit("PLAN STEP", current_step=index, status=plan["status"])
+            debug.emit(
+                EventType.PLAN_STEP,
+                status=plan["status"],
+                metadata={"current_step": index, "plan": plan},
+            )
             return {"plan": plan, "step_failed": False}
 
         def fail_step_node(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -341,7 +362,11 @@ class _ExecutionStrategySupport:
                     else "failed"
                 ),
             )
-            debug.emit("PLAN STEP", current_step=index, status=plan["status"])
+            debug.emit(
+                EventType.PLAN_FAIL,
+                status=plan["status"],
+                metadata={"current_step": index, "plan": plan},
+            )
             return {"plan": plan, "step_failed": False}
 
         def tool_node(
@@ -385,6 +410,12 @@ class _ExecutionStrategySupport:
                 plan = dict(state["plan"])
                 if plan.get("status") == "synthesizing":
                     plan["status"] = "completed"
+                if plan.get("status") == "completed":
+                    debug.emit(
+                        EventType.PLAN_COMPLETE,
+                        status="completed",
+                        metadata={"plan": plan},
+                    )
                 return {"plan": plan}
 
             graph.add_node("finalize", finalize_node)
@@ -429,7 +460,11 @@ class _ExecutionStrategySupport:
                     "status": "executing",
                     "replan_count": 0,
                 }
-                debug.emit("PLAN", plan=plan)
+                debug.emit(
+                    EventType.PLAN_CREATE,
+                    status="created",
+                    metadata={"plan": plan},
+                )
                 return {"plan": plan}
 
             graph.add_node("planner", plan_node)
@@ -491,7 +526,14 @@ class _ExecutionStrategySupport:
                     status="executing",
                     replan_count=int(plan["replan_count"]) + 1,
                 )
-                debug.emit("REPLAN", plan=plan, replan_count=plan["replan_count"])
+                debug.emit(
+                    EventType.PLAN_REPLAN,
+                    status="replanned",
+                    metadata={
+                        "plan": plan,
+                        "replan_count": plan["replan_count"],
+                    },
+                )
                 return {"plan": plan, "step_failed": False}
 
             graph.add_node("replan", replan_node)
@@ -570,15 +612,24 @@ class _ExecutionStrategySupport:
             """Load a candidate skill and all of its dependencies into agent context."""
             ordered = registry.load_order(name, tool_names)
             debug.emit(
-                "SKILL LOAD",
-                name=name,
-                dependencies=[item.identifier for item in ordered[:-1]],
+                EventType.SKILL_LOAD,
+                status="loaded",
+                metadata={
+                    "name": name,
+                    "skills": [item.identifier for item in ordered],
+                    "dependencies": [item.identifier for item in ordered[:-1]],
+                },
             )
             return "Loaded skills: " + ", ".join(item.identifier for item in ordered)
 
         def unload_skill(name: str) -> str:
             """Unload a skill from the current agent context."""
             skill = registry.get(name)
+            debug.emit(
+                EventType.SKILL_UNLOAD,
+                status="unloaded",
+                metadata={"name": skill.identifier},
+            )
             return f"Skill '{skill.identifier}' unloaded."
 
         def read_skill_reference(skill: str, name: str) -> str:
@@ -598,8 +649,26 @@ class _ExecutionStrategySupport:
         ) -> dict[str, Any]:
             """Run a declared skill script with JSON arguments."""
             target = registry.get(skill)
-            debug.emit("SKILL SCRIPT", skill=target.identifier, script=script)
-            return runner.run(target, script, arguments).as_dict()
+            debug.emit(
+                EventType.SKILL_SCRIPT,
+                status="started",
+                metadata={
+                    "skill": target.identifier,
+                    "script": script,
+                    "arguments": arguments or {},
+                },
+            )
+            result = runner.run(target, script, arguments).as_dict()
+            debug.emit(
+                EventType.SKILL_SCRIPT,
+                status=result["status"],
+                metadata={
+                    "skill": target.identifier,
+                    "script": script,
+                    "result": result,
+                },
+            )
+            return result
 
         tools: list[BaseTool] = [
             StructuredTool.from_function(load_skill, name="load_skill"),
@@ -717,15 +786,14 @@ class _ExecutionStrategySupport:
         any_failed = False
         if call["name"] not in tools:
             raise ToolError(f"Model requested unknown tool: {call['name']}")
-        if call["name"] in subagent_names:
-            debug.emit(
-                "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
-            )
-        debug.emit("TOOL CALL", name=call["name"])
         if "mcp" in type(tools[call["name"]]).__module__.lower() or (
             tools[call["name"]].metadata or {}
         ).get("mcp"):
-            debug.emit("MCP TOOL", name=call["name"])
+            debug.emit(
+                EventType.MCP_TOOL,
+                status="started",
+                metadata={"name": call["name"]},
+            )
         succeeded = False
         execution = middleware.current_execution()
         previous_call_id = execution.metadata.get("current_tool_call_id")
@@ -748,7 +816,6 @@ class _ExecutionStrategySupport:
             raise
         except Exception as exc:  # noqa: BLE001 - tool failures are observations
             any_failed = True
-            debug.emit("ERROR", error=str(exc))
             value = f"Error: {exc}"
         finally:
             if previous_call_id is None:
@@ -764,9 +831,6 @@ class _ExecutionStrategySupport:
                 business_tool_names,
                 int(state.get("session_turn", 1)),
             )
-        debug.emit("TOOL RESULT", name=call["name"], result=value)
-        if call["name"] in subagent_names:
-            debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
         next_index = index + 1
         return {
             "messages": [self._result(call, value)],
@@ -801,15 +865,14 @@ class _ExecutionStrategySupport:
         any_failed = False
         if call["name"] not in tools:
             raise ToolError(f"Model requested unknown tool: {call['name']}")
-        if call["name"] in subagent_names:
-            debug.emit(
-                "SUBAGENT CALL", name=call["name"], task=call["args"].get("task")
-            )
-        debug.emit("TOOL CALL", name=call["name"])
         if "mcp" in type(tools[call["name"]]).__module__.lower() or (
             tools[call["name"]].metadata or {}
         ).get("mcp"):
-            debug.emit("MCP TOOL", name=call["name"])
+            debug.emit(
+                EventType.MCP_TOOL,
+                status="started",
+                metadata={"name": call["name"]},
+            )
         succeeded = False
         execution = middleware.current_execution()
         previous_call_id = execution.metadata.get("current_tool_call_id")
@@ -832,7 +895,6 @@ class _ExecutionStrategySupport:
             raise
         except Exception as exc:  # noqa: BLE001 - tool failures are observations
             any_failed = True
-            debug.emit("ERROR", error=str(exc))
             value = f"Error: {exc}"
         finally:
             if previous_call_id is None:
@@ -848,9 +910,6 @@ class _ExecutionStrategySupport:
                 business_tool_names,
                 int(state.get("session_turn", 1)),
             )
-        debug.emit("TOOL RESULT", name=call["name"], result=value)
-        if call["name"] in subagent_names:
-            debug.emit("SUBAGENT RESULT", name=call["name"], result=value)
         next_index = index + 1
         return {
             "messages": [self._result(call, value)],
@@ -874,7 +933,10 @@ class _ExecutionStrategySupport:
             "args": dict(call["args"]),
             "message": metadata.get("harness_approval_message"),
         }
-        debug.emit("HITL INTERRUPT", **payload)
+        execution = MiddlewarePipeline.current_execution()
+        replayed = bool(execution.metadata.pop("resume_pending", False))
+        if not replayed:
+            debug.emit(EventType.HITL_PAUSE, status="paused", metadata=payload)
         decision = interrupt(payload)
         if isinstance(decision, str):
             decision = {"decision": decision}

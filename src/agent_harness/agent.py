@@ -15,6 +15,7 @@ from langgraph.types import interrupt
 from .definition import AgentDefinition
 from .errors import SubAgentError
 from .middleware import MiddlewarePipeline
+from .observability import RuntimeMetrics, StreamEvent
 from .runtime import AgentRuntime, _derive_child_session_id
 
 
@@ -105,7 +106,7 @@ class Agent:
         context: Mapping[str, Any] | None = None,
         memory_id: str | None = None,
         **kwargs: Any,
-    ) -> Iterator[Any]:
+    ) -> Iterator[StreamEvent]:
         return self.runtime.stream(
             value,
             config,
@@ -124,7 +125,7 @@ class Agent:
         context: Mapping[str, Any] | None = None,
         memory_id: str | None = None,
         **kwargs: Any,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncIterator[StreamEvent]:
         return self.runtime.astream(
             value,
             config,
@@ -133,6 +134,48 @@ class Agent:
             memory_id=memory_id,
             **kwargs,
         )
+
+    def raw_stream(
+        self,
+        value: str | dict[str, Any],
+        config: RunnableConfig | None = None,
+        *,
+        session_id: str | None = None,
+        context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
+        **kwargs: Any,
+    ) -> Iterator[Any]:
+        return self.runtime.raw_stream(
+            value,
+            config,
+            session_id=session_id,
+            context=context,
+            memory_id=memory_id,
+            **kwargs,
+        )
+
+    def araw_stream(
+        self,
+        value: str | dict[str, Any],
+        config: RunnableConfig | None = None,
+        *,
+        session_id: str | None = None,
+        context: Mapping[str, Any] | None = None,
+        memory_id: str | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
+        return self.runtime.araw_stream(
+            value,
+            config,
+            session_id=session_id,
+            context=context,
+            memory_id=memory_id,
+            **kwargs,
+        )
+
+    @property
+    def metrics(self) -> RuntimeMetrics:
+        return self.runtime.metrics
 
     def resume(
         self, *, session_id: str, decision: str | Mapping[str, Any]
@@ -242,11 +285,8 @@ class Agent:
             for _ in range(completed):
                 interrupt(payload)
 
-        def run(task: str) -> dict[str, Any]:
+        def _run(task: str) -> dict[str, Any]:
             """Delegate one explicit task and return only its final business result."""
-            self.runtime.debug.emit(
-                "SUBAGENT CALL", name=self.definition.name, task=task
-            )
             try:
                 child_session, memory_id = child_scope()
                 paused_at_entry = bool(
@@ -294,16 +334,10 @@ class Agent:
                     },
                     error=str(error),
                 )
-            self.runtime.debug.emit(
-                "SUBAGENT RESULT", name=self.definition.name, status=result.status
-            )
             return result.as_dict()
 
-        async def arun(task: str) -> dict[str, Any]:
+        async def _arun(task: str) -> dict[str, Any]:
             """Delegate one explicit task and return only its final business result."""
-            self.runtime.debug.emit(
-                "SUBAGENT CALL", name=self.definition.name, task=task
-            )
             try:
                 child_session, memory_id = child_scope()
                 paused_at_entry = bool(
@@ -352,10 +386,45 @@ class Agent:
                     },
                     error=str(error),
                 )
-            self.runtime.debug.emit(
-                "SUBAGENT RESULT", name=self.definition.name, status=result.status
-            )
             return result.as_dict()
+
+        def run(task: str) -> dict[str, Any]:
+            parent_execution = None
+            try:
+                parent_execution = MiddlewarePipeline.current_execution()
+                observer = parent_execution.debug or self.runtime.observer
+            except RuntimeError:
+                observer = self.runtime.observer
+            with observer.span(
+                "subagent", name=self.definition.name, task=task
+            ) as span:
+                result = _run(task)
+                span.status = str(result["status"])
+                span.metadata["result_status"] = result["status"]
+                if result.get("error"):
+                    span.metadata["error"] = result["error"]
+                if parent_execution is not None:
+                    parent_execution.metadata.pop("resume_pending", None)
+                return result
+
+        async def arun(task: str) -> dict[str, Any]:
+            parent_execution = None
+            try:
+                parent_execution = MiddlewarePipeline.current_execution()
+                observer = parent_execution.debug or self.runtime.observer
+            except RuntimeError:
+                observer = self.runtime.observer
+            with observer.span(
+                "subagent", name=self.definition.name, task=task
+            ) as span:
+                result = await _arun(task)
+                span.status = str(result["status"])
+                span.metadata["result_status"] = result["status"]
+                if result.get("error"):
+                    span.metadata["error"] = result["error"]
+                if parent_execution is not None:
+                    parent_execution.metadata.pop("resume_pending", None)
+                return result
 
         tool = StructuredTool.from_function(
             run,
@@ -419,6 +488,7 @@ class Agent:
                 "agent": self.definition.name,
                 "iteration": state.get("iteration", 0),
                 "plan_status": plan_status,
+                "trace_id": state.get("runtime_metadata", {}).get("trace_id"),
             },
             state=state,
         )

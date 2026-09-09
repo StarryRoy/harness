@@ -20,9 +20,19 @@ mcp = ["langchain-mcp-adapters>=0.1,<1"]
 persistence-sqlite = ["langgraph-checkpoint-sqlite>=3,<4"]
 persistence-postgres = ["langgraph-checkpoint-postgres>=3,<4"]
 enterprise = ["langmem==0.0.30", "langchain-mcp-adapters>=0.1,<1"]
+test = [
+  "pytest>=8,<9",
+  "ruff>=0.9,<1",
+  "langgraph-checkpoint-sqlite>=3,<4",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_harness"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88

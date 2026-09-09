@@ -2,6 +2,7 @@
 
 from .agent import Agent, AgentResult, SubAgentResult
 from .context import AgentContextManager, ContextPolicy
+from .debug import DebugHandler
 from .definition import AgentDefinition, RuntimeConfig
 from .enterprise import (
     GuardrailMiddleware,
@@ -36,6 +37,22 @@ from .middleware import (
     ToolRequest,
     default_middleware,
 )
+from .observability import (
+    BufferedEventSink,
+    CompositeEventSink,
+    ConsoleEventSink,
+    EventSink,
+    EventType,
+    JsonEventSink,
+    MetricsEventSink,
+    ObservabilityConfig,
+    RuntimeEvent,
+    RuntimeMetrics,
+    RuntimeObserver,
+    StreamEvent,
+    StreamEventType,
+    sanitize_payload,
+)
 from .persistence import PersistenceConfig, configure_default_persistence
 from .skills import (
     LexicalSkillSelector,
@@ -63,26 +80,38 @@ __all__ = [
     "AgentResult",
     "AgentState",
     "AgentStrategy",
+    "BufferedEventSink",
     "CallLimitMiddleware",
+    "CompositeEventSink",
+    "ConsoleEventSink",
     "ContextPolicy",
+    "DebugHandler",
+    "EventSink",
+    "EventType",
     "GuardrailMiddleware",
     "GuardrailResult",
     "HITLError",
+    "JsonEventSink",
     "LexicalSkillSelector",
     "MCPError",
     "MemoryConfig",
     "MemoryError",
+    "MetricsEventSink",
     "MiddlewareError",
     "MiddlewarePipeline",
     "ModelError",
     "ModelFallbackMiddleware",
     "ModelRequest",
+    "ObservabilityConfig",
     "PersistenceConfig",
     "PersistenceError",
     "PlanExecuteStrategy",
     "ReActStrategy",
     "RetryMiddleware",
     "RuntimeConfig",
+    "RuntimeEvent",
+    "RuntimeMetrics",
+    "RuntimeObserver",
     "ScriptResult",
     "SessionError",
     "Skill",
@@ -94,6 +123,8 @@ __all__ = [
     "SkillSelector",
     "SkillValidator",
     "StrategyError",
+    "StreamEvent",
+    "StreamEventType",
     "SubAgentError",
     "SubAgentResult",
     "TimeoutMiddleware",
@@ -106,4 +137,5 @@ __all__ = [
     "default_middleware",
     "load_mcp_tools",
     "require_approval",
+    "sanitize_payload",
 ]

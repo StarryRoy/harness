@@ -42,8 +42,11 @@ print(result.output)
 
 所有执行都使用公开 `session_id`。调用时未传 ID，Harness 会生成 `session-...` 并通过
 `AgentResult.session_id` 返回；HITL 暂停后可以直接用该 ID 恢复，不存在应用层无法取得的
-隐藏 ephemeral ID。由于当前 Streaming API 尚不返回统一结果封装，`stream` / `astream`
-必须显式传入非空 `session_id`；该 ID 可直接用于 HITL 恢复及 Session 清理。同一 ID 通过
+隐藏 ephemeral ID。`stream` / `astream` 返回稳定的 `StreamEvent`，事件类型包括
+`text_delta`、`tool_start/end`、`subagent_start/end`、`approval_required`、
+`plan_update`、`final` 和 `error`，无需理解 LangGraph chunk 或节点名称。两者必须显式传入
+非空 `session_id`；该 ID 可直接用于 HITL 恢复及 Session 清理。需要原始 LangGraph
+事件的高级集成可使用 `raw_stream` / `araw_stream`。同一 ID 通过
 LangGraph Checkpointer 保持上下文，不同 ID 隔离；应用层不接触 `thread_id`。
 默认 Session namespace 使用稳定的 Agent name，因此重新创建同名 Agent 后仍可从
 持久化 Checkpointer 恢复。高级用户可用 `session_namespace="service-a"` 区分同名
@@ -288,15 +291,28 @@ print(json.dumps({"result": arguments["value"] * 2}))
 Token 不会因父进程环境而自动暴露。该机制继续保留受控路径、timeout、stdout 大小限制及
 JSON stdin/stdout 合约，但不是完整安全沙箱；Skill 来源仍应可信。
 
-## Debug
+## Observability 与 Debug
 
-`RuntimeConfig(debug=True, debug_format="print")` 可输出极简事件，包括
-`SESSION`、`MIDDLEWARE`、`SUBAGENT CALL/RESULT`、`SKILL SCRIPT`、Model 和 Tool
-调用。`debug_format` 支持 `print`、`json`、`md`。
+`create_agent(event_sink=sink)` 或 `event_sinks=[sink_a, sink_b]` 可接入实现
+`emit(RuntimeEvent)` 的日志、审计或遥测平台。每个事件都有稳定的 `event_type`、时间、
+Agent/Session、trace/span/parent span、状态、耗时、元数据和错误字段；一次请求及其
+SubAgent 共用 `trace_id`，HITL resume 继续原 trace。`agent.metrics` 提供 Agent、Model、
+Tool、SubAgent、retry/fallback、HITL、Skill、summary、Memory 和 token usage 基础指标。
+
+默认事件会脱敏 API Key、Token、密码等字段，限制集合和字符串大小，并省略完整 Model
+messages。可通过 `RuntimeConfig(observability=ObservabilityConfig(...))` 调整 payload
+详细度与上限。任何 EventSink 异常都会与主流程隔离。
+
+`RuntimeConfig(debug=True, debug_format="print")` 只是上述 EventSink 的轻量控制台实现；
+`debug_format` 支持 `print`、`json`、`md`，Runtime 本身不再散落直接 `print`。
 
 ## 开发检查
 
 ```powershell
 python -m compileall -q src
-ruff check src
+ruff check src tests
+pytest -q
 ```
+
+CI 在 Pull Request 上运行 Ruff，并在 Python 3.10、3.11、3.12 执行核心测试。测试默认
+使用临时 SQLite Checkpointer/Store，不把内存存储当作运行时持久化实现。

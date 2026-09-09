@@ -11,3 +11,4 @@ PyYAML>=6.0,<7
 # 本地开发与测试依赖
 pytest>=8.0,<9
 ruff>=0.9,<1
+langgraph-checkpoint-sqlite>=3,<4

@@ -10,6 +10,7 @@ from langchain_core.tools import BaseTool
 
 from .context import ContextPolicy
 from .middleware import AgentMiddleware
+from .observability import ObservabilityConfig
 from .skills import Skill
 
 
@@ -26,6 +27,7 @@ class RuntimeConfig:
     script_timeout_seconds: float = 30.0
     script_env_allowlist: tuple[str, ...] = ()
     context_policy: ContextPolicy = field(default_factory=ContextPolicy)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def __post_init__(self) -> None:
         if self.max_iterations < 1:
@@ -47,6 +49,8 @@ class RuntimeConfig:
             )
         if self.debug_format not in {"print", "json", "md"}:
             raise ValueError("debug_format must be 'print', 'json', or 'md'")
+        if not isinstance(self.observability, ObservabilityConfig):
+            raise TypeError("observability must be an ObservabilityConfig")
 
 
 @dataclass(slots=True)

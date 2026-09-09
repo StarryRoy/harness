@@ -1,27 +1,35 @@
-"""Deliberately minimal, replaceable debug output."""
+"""Backward-compatible debug sink built on the stable event contract."""
 
-import json
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from typing import Any
+
+from .observability import ConsoleEventSink, RuntimeEvent
 
 
 @dataclass(slots=True)
 class DebugHandler:
+    """A lightweight EventSink enabled by ``RuntimeConfig.debug``.
+
+    Runtime code sends structured events.  The legacy string form remains
+    accepted for direct callers while they migrate.
+    """
+
     enabled: bool = False
     format: str = "print"
+    _sink: ConsoleEventSink = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.format not in {"print", "json", "md"}:
             raise ValueError("debug format must be 'print', 'json', or 'md'")
+        self._sink = ConsoleEventSink(
+            format="text" if self.format == "print" else self.format
+        )
 
-    def emit(self, event: str, **details: Any) -> None:
+    def emit(self, event: RuntimeEvent | str, **details: Any) -> None:
         if not self.enabled:
             return
-        if self.format == "json":
-            print(
-                json.dumps({"event": event, **details}, default=str, ensure_ascii=False)
-            )
-            return
-        suffix = " ".join(f"{key}={value!r}" for key, value in details.items())
-        prefix = f"**{event}**" if self.format == "md" else event
-        print(f"{prefix}{' ' + suffix if suffix else ''}")
+        if not isinstance(event, RuntimeEvent):
+            event = RuntimeEvent(str(event), metadata=details)
+        self._sink.emit(event)

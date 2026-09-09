@@ -14,6 +14,7 @@ from .enterprise import GuardrailMiddleware, ModelFallbackMiddleware
 from .errors import PersistenceError
 from .memory import LongTermMemory, MemoryConfig
 from .middleware import AgentMiddleware, default_middleware
+from .observability import EventSink
 from .persistence import default_persistence, validate_checkpointer, validate_store
 from .runtime import AgentRuntime
 from .skills import Skill, SkillLoader, SkillRegistry, SkillSelector
@@ -77,6 +78,8 @@ def create_agent(
     memory_schema: type | None = None,
     guardrail: GuardrailMiddleware | None = None,
     fallback: Sequence[BaseChatModel] | None = None,
+    event_sink: EventSink | None = None,
+    event_sinks: Sequence[EventSink] | EventSink | None = None,
 ) -> Agent:
     """Validate configuration, compile the graph, and return an Agent."""
     config = runtime_config or RuntimeConfig()
@@ -157,6 +160,17 @@ def create_agent(
         else None
     )
 
+    if event_sinks is None:
+        configured_sinks: tuple[EventSink, ...] = ()
+    elif callable(getattr(event_sinks, "emit", None)):
+        configured_sinks = (event_sinks,)  # type: ignore[assignment]
+    else:
+        configured_sinks = tuple(event_sinks)
+    if event_sink is not None:
+        configured_sinks = (event_sink, *configured_sinks)
+    if any(not callable(getattr(item, "emit", None)) for item in configured_sinks):
+        raise TypeError("event_sink/event_sinks entries must implement emit(event)")
+
     definition = AgentDefinition(
         name=name,
         description=description,
@@ -179,5 +193,6 @@ def create_agent(
         resolved_checkpointer,
         session_namespace=session_namespace,
         memory=memory_runtime,
+        event_sinks=configured_sinks,
     )
     return Agent(definition, runtime, subagents=subagent_tools)

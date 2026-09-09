@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .errors import AgentError, MiddlewareError
+from .observability import EventType, token_usage
 
 
 @dataclass(slots=True)
@@ -142,9 +143,10 @@ class RetryMiddleware(AgentMiddleware):
         for attempt in range(1, self.max_attempts + 1):
             try:
                 return call_next(request)
-            except self.exceptions:
+            except self.exceptions as exc:
                 if attempt == self.max_attempts:
                     raise
+                self._emit_retry(request, attempt + 1, exc)
                 if self.delay_seconds:
                     time.sleep(self.delay_seconds)
         raise AssertionError("unreachable")
@@ -155,12 +157,30 @@ class RetryMiddleware(AgentMiddleware):
         for attempt in range(1, self.max_attempts + 1):
             try:
                 return await call_next(request)
-            except self.exceptions:
+            except self.exceptions as exc:
                 if attempt == self.max_attempts:
                     raise
+                self._emit_retry(request, attempt + 1, exc)
                 if self.delay_seconds:
                     await asyncio.sleep(self.delay_seconds)
         raise AssertionError("unreachable")
+
+    @staticmethod
+    def _emit_retry(request: Any, attempt: int, error: Exception) -> None:
+        observer = getattr(request.execution, "debug", None)
+        if observer is None:
+            return
+        event_type = (
+            EventType.MODEL_RETRY
+            if isinstance(request, ModelRequest)
+            else EventType.TOOL_RETRY
+        )
+        observer.emit(
+            event_type,
+            status="retry",
+            metadata={"attempt": attempt},
+            error=error,
+        )
 
     def wrap_model_call(self, request: ModelRequest, call_next: ModelHandler) -> Any:
         return self._run(request, call_next)
@@ -289,7 +309,10 @@ class MiddlewarePipeline:
 
     def before_agent(self, execution: AgentExecution) -> None:
         for item in self.middleware:
-            self.debug.emit("MIDDLEWARE", hook="before_agent", name=type(item).__name__)
+            self.debug.emit(
+                EventType.MIDDLEWARE_HOOK,
+                metadata={"hook": "before_agent", "name": type(item).__name__},
+            )
             try:
                 item.before_agent(execution)
             except AgentError:
@@ -301,7 +324,10 @@ class MiddlewarePipeline:
 
     async def abefore_agent(self, execution: AgentExecution) -> None:
         for item in self.middleware:
-            self.debug.emit("MIDDLEWARE", hook="before_agent", name=type(item).__name__)
+            self.debug.emit(
+                EventType.MIDDLEWARE_HOOK,
+                metadata={"hook": "before_agent", "name": type(item).__name__},
+            )
             try:
                 await item.abefore_agent(execution)
             except AgentError:
@@ -313,7 +339,10 @@ class MiddlewarePipeline:
 
     def model(self, request: ModelRequest, handler: ModelHandler) -> Any:
         for item in self.middleware:
-            self.debug.emit("MIDDLEWARE", hook="before_model", name=type(item).__name__)
+            self.debug.emit(
+                EventType.MIDDLEWARE_HOOK,
+                metadata={"hook": "before_model", "name": type(item).__name__},
+            )
             try:
                 item.before_model(request)
             except AgentError:
@@ -324,9 +353,21 @@ class MiddlewarePipeline:
                 ) from exc
 
         def terminal(req: ModelRequest) -> Any:
-            if req.model_override is not None:
-                return req.invoke_with(req.model_override)
-            return handler(req)
+            observer = getattr(req.execution, "debug", None)
+            if observer is None or not callable(getattr(observer, "span", None)):
+                if req.model_override is not None:
+                    return req.invoke_with(req.model_override)
+                return handler(req)
+            target = req.model_override
+            model_name = type(target).__name__ if target is not None else "primary"
+            with observer.span("model", purpose=req.purpose, model=model_name) as span:
+                response = (
+                    req.invoke_with(target) if target is not None else handler(req)
+                )
+                usage = token_usage(response)
+                if usage:
+                    span.metadata["token_usage"] = usage
+                return response
 
         call: ModelHandler = terminal
         for item in reversed(self.middleware):
@@ -355,7 +396,10 @@ class MiddlewarePipeline:
 
     async def amodel(self, request: ModelRequest, handler: AsyncModelHandler) -> Any:
         for item in self.middleware:
-            self.debug.emit("MIDDLEWARE", hook="before_model", name=type(item).__name__)
+            self.debug.emit(
+                EventType.MIDDLEWARE_HOOK,
+                metadata={"hook": "before_model", "name": type(item).__name__},
+            )
             try:
                 await item.abefore_model(request)
             except AgentError:
@@ -366,9 +410,23 @@ class MiddlewarePipeline:
                 ) from exc
 
         async def terminal(req: ModelRequest) -> Any:
-            if req.model_override is not None:
-                return await req.ainvoke_with(req.model_override)
-            return await handler(req)
+            observer = getattr(req.execution, "debug", None)
+            if observer is None or not callable(getattr(observer, "span", None)):
+                if req.model_override is not None:
+                    return await req.ainvoke_with(req.model_override)
+                return await handler(req)
+            target = req.model_override
+            model_name = type(target).__name__ if target is not None else "primary"
+            with observer.span("model", purpose=req.purpose, model=model_name) as span:
+                response = (
+                    await req.ainvoke_with(target)
+                    if target is not None
+                    else await handler(req)
+                )
+                usage = token_usage(response)
+                if usage:
+                    span.metadata["token_usage"] = usage
+                return response
 
         call: AsyncModelHandler = terminal
         for item in reversed(self.middleware):
@@ -396,7 +454,21 @@ class MiddlewarePipeline:
         return response
 
     def tool(self, request: ToolRequest, handler: ToolHandler) -> Any:
-        call = handler
+        def terminal(req: ToolRequest) -> Any:
+            observer = getattr(req.execution, "debug", None)
+            if observer is None or not callable(getattr(observer, "span", None)):
+                return handler(req)
+            with observer.span(
+                "tool",
+                name=req.tool.name,
+                arguments=dict(req.arguments),
+                tool_call_id=req.tool_call_id,
+            ) as span:
+                result = handler(req)
+                span.metadata["result"] = result
+                return result
+
+        call = terminal
         for item in reversed(self.middleware):
             next_call = call
 
@@ -411,7 +483,21 @@ class MiddlewarePipeline:
         return call(request)
 
     async def atool(self, request: ToolRequest, handler: AsyncToolHandler) -> Any:
-        call = handler
+        async def terminal(req: ToolRequest) -> Any:
+            observer = getattr(req.execution, "debug", None)
+            if observer is None or not callable(getattr(observer, "span", None)):
+                return await handler(req)
+            with observer.span(
+                "tool",
+                name=req.tool.name,
+                arguments=dict(req.arguments),
+                tool_call_id=req.tool_call_id,
+            ) as span:
+                result = await handler(req)
+                span.metadata["result"] = result
+                return result
+
+        call = terminal
         for item in reversed(self.middleware):
             next_call = call
 
@@ -427,7 +513,10 @@ class MiddlewarePipeline:
 
     def after_agent(self, execution: AgentExecution, result: Any) -> Any:
         for item in reversed(self.middleware):
-            self.debug.emit("MIDDLEWARE", hook="after_agent", name=type(item).__name__)
+            self.debug.emit(
+                EventType.MIDDLEWARE_HOOK,
+                metadata={"hook": "after_agent", "name": type(item).__name__},
+            )
             try:
                 updated = item.after_agent(execution, result)
             except AgentError:
@@ -441,7 +530,10 @@ class MiddlewarePipeline:
 
     async def aafter_agent(self, execution: AgentExecution, result: Any) -> Any:
         for item in reversed(self.middleware):
-            self.debug.emit("MIDDLEWARE", hook="after_agent", name=type(item).__name__)
+            self.debug.emit(
+                EventType.MIDDLEWARE_HOOK,
+                metadata={"hook": "after_agent", "name": type(item).__name__},
+            )
             try:
                 updated = await item.aafter_agent(execution, result)
             except AgentError:

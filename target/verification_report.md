@@ -1,16 +1,17 @@
-# 三阶段目标验收报告
+# 四阶段目标验收报告
 
 验收日期：2026-09-09
 
 ## 结论
 
-在当前仓库的确定性验收范围内，Phase 1、Phase 2、Phase 3 的既有核心链路继续通过。
+在当前仓库的确定性验收范围内，Phase 1、Phase 2、Phase 3 的既有核心链路继续通过，
+Phase 4 的 Observability、稳定 Streaming 和测试基础设施已落地。
 本次在不重写 ReAct、PlanExecute、SubAgent、HITL、Skill、Middleware 和 LangMem 架构的
 前提下，补齐了应用层结果 API、持久化边界和 Session 生命周期，并修正 Plan 失败状态。
 
 ## 自动检查结果
 
-- `python -m pytest -q`：63 passed。
+- `python -m pytest -q`：74 passed。
 - `ruff check .`：All checks passed。
 - `ruff format --check .`：全部文件已格式化。
 - `python -m compileall -q src tests`：通过。
@@ -50,6 +51,24 @@
 - PlanExecute 与 Structured Output 的组合图保持通过。
 - Skill dependencies、版本、动态发现、references/resources/scripts 及路径限制保持通过。
 - 本地 stdio MCP Tool、Guardrail、统一错误边界和 Debug 事件保持通过。
+
+## Phase 4 新增验收
+
+- `RuntimeEvent`、`StreamEvent`、`EventSink`、`RuntimeObserver` 和 `MetricsEventSink`
+  提供稳定的运行事件、调用链、耗时、重试/fallback、HITL、Skill、Memory、summary 与
+  token usage 指标；Observer/Sink 异常不会影响 Agent 主流程。
+- Main Agent、Model、Tool、SubAgent、Child Model 共用同一 `trace_id`，通过
+  `parent_span_id` 形成调用树；HITL resume 保持原 trace，且暂停事件不因恢复重放而重复计数。
+- `stream/astream` 返回 `text_delta`、`tool_start/end`、`subagent_start/end`、
+  `approval_required`、`plan_update`、`final`、`error` 等稳定应用事件；
+  `raw_stream/araw_stream` 保留底层 LangGraph 访问。
+- 默认观察 payload 经过敏感字段脱敏、消息省略和长度/集合截断；可通过
+  `ObservabilityConfig` 调整 `minimal/standard/full` 详细度。
+- 新增 `tests/unit`、`tests/contract`、`tests/integration`、`tests/acceptance`、
+  `tests/regression` 分层入口与可复用 Deterministic FakeModel/FakeTool/FakeSubAgent/FakeEventSink；
+  测试持久化夹具使用临时 SQLite 文件 Checkpointer/Store，不使用内存实现作为运行时后端。
+- 新增 `.github/workflows/ci.yml`，Pull Request 自动执行 Ruff 和 Python 3.10/3.11/3.12
+  核心测试矩阵。
 
 ## 明确限制
 

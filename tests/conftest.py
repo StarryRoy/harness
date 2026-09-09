@@ -1,19 +1,27 @@
+import asyncio
+import sqlite3
+
 import pytest
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.store.base import BaseStore
-from langgraph.store.memory import InMemoryStore
+from langgraph.store.sqlite import SqliteStore
 
 from agent_harness import configure_default_persistence
 
 
 class PersistentSaverStub(BaseCheckpointSaver):
-    """Interface-complete explicit test double; production rejects its backend type."""
+    """Sync/async adapter over a real temporary SQLite checkpoint database."""
 
-    def __init__(self):
+    def __init__(self, path):
         super().__init__()
-        self.backend = InMemorySaver()
+        self.path = str(path)
+        self.connection = sqlite3.connect(path, check_same_thread=False)
+        self.backend = SqliteSaver(self.connection)
         self.deleted = []
+
+    def close(self):
+        self.connection.close()
 
     def get_tuple(self, *args, **kwargs):
         return self.backend.get_tuple(*args, **kwargs)
@@ -32,40 +40,52 @@ class PersistentSaverStub(BaseCheckpointSaver):
         return self.backend.delete_thread(*args, **kwargs)
 
     async def aget_tuple(self, *args, **kwargs):
-        return await self.backend.aget_tuple(*args, **kwargs)
+        return await asyncio.to_thread(self.backend.get_tuple, *args, **kwargs)
 
     async def alist(self, *args, **kwargs):
-        async for item in self.backend.alist(*args, **kwargs):
+        items = await asyncio.to_thread(
+            lambda: list(self.backend.list(*args, **kwargs))
+        )
+        for item in items:
             yield item
 
     async def aput(self, *args, **kwargs):
-        return await self.backend.aput(*args, **kwargs)
+        return await asyncio.to_thread(self.backend.put, *args, **kwargs)
 
     async def aput_writes(self, *args, **kwargs):
-        return await self.backend.aput_writes(*args, **kwargs)
+        return await asyncio.to_thread(self.backend.put_writes, *args, **kwargs)
 
     async def adelete_thread(self, *args, **kwargs):
         self.deleted.append(args[0])
-        return await self.backend.adelete_thread(*args, **kwargs)
+        return await asyncio.to_thread(self.backend.delete_thread, *args, **kwargs)
 
 
 class PersistentStoreStub(BaseStore):
-    def __init__(self):
-        self.backend = InMemoryStore()
+    def __init__(self, path):
+        self.path = str(path)
+        self.connection = sqlite3.connect(path, check_same_thread=False)
+        self.backend = SqliteStore(self.connection)
+        self.backend.setup()
+        self.connection.commit()
+
+    def close(self):
+        self.connection.close()
 
     def batch(self, *args, **kwargs):
         return self.backend.batch(*args, **kwargs)
 
     async def abatch(self, *args, **kwargs):
-        return await self.backend.abatch(*args, **kwargs)
+        return await asyncio.to_thread(self.backend.batch, *args, **kwargs)
 
 
 @pytest.fixture
-def persistent_defaults():
-    saver = PersistentSaverStub()
-    store = PersistentStoreStub()
+def persistent_defaults(tmp_path):
+    saver = PersistentSaverStub(tmp_path / "checkpoints.sqlite")
+    store = PersistentStoreStub(tmp_path / "store.sqlite")
     configure_default_persistence(checkpointer=saver, store=store)
     try:
         yield saver, store
     finally:
         configure_default_persistence(checkpointer=None, store=None)
+        saver.close()
+        store.close()
