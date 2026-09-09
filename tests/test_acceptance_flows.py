@@ -177,7 +177,12 @@ def test_phase1_sync_async_and_stream_apis():
             instructions="async stream",
             model=HarnessFakeModel(responses=[AIMessage(content="astream-final")]),
         )
-        chunks = [chunk async for chunk in async_stream_agent.astream("hello")]
+        chunks = [
+            chunk
+            async for chunk in async_stream_agent.astream(
+                "hello", session_id="async-stream-session"
+            )
+        ]
         return async_result, chunks
 
     result, async_chunks = asyncio.run(run_async())
@@ -189,7 +194,7 @@ def test_phase1_sync_async_and_stream_apis():
         instructions="stream",
         model=HarnessFakeModel(responses=[AIMessage(content="stream-final")]),
     )
-    assert list(stream_agent.stream("hello"))
+    assert list(stream_agent.stream("hello", session_id="stream-session"))
 
 
 def test_phase2_subagents_sessions_and_skill_isolation():

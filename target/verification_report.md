@@ -10,7 +10,7 @@
 
 ## 自动检查结果
 
-- `python -m pytest -q`：59 passed。
+- `python -m pytest -q`：63 passed。
 - `ruff check .`：All checks passed。
 - `ruff format --check .`：全部文件已格式化。
 - `python -m compileall -q src tests`：通过。
@@ -29,6 +29,10 @@
   已知内存 Checkpointer/Store 会被拒绝，`memory=True` 缺少持久化 Store 时立即失败。
 - `clear_session/aclear_session` 会删除转换后的内部 thread checkpoint；再次使用同一公开
   Session ID 时从空历史开始，后端异常统一包装为 `PersistenceError`。
+- `stream/astream` 缺少公开 Session ID 时立即拒绝执行；显式 Session 下的同步、异步
+  Streaming HITL 均可恢复并可清理。
+- 删除 Main Session 会根据其持久化 SubAgent tool call 关系递归清理 child checkpoint；
+  覆盖不同 Main Session 隔离及暂停中 SubAgent 的异步清理。
 - Skill 默认字面选择行为迁入 `LexicalSkillSelector`，并验证自定义 `SkillSelector` 注入。
 - 新 `assets/` 与兼容的 `resources/` 均可按需读取；Skill Script 默认不继承完整父进程
   环境，只有 allowlist 中显式允许的业务变量可见。

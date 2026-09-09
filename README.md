@@ -42,7 +42,8 @@ print(result.output)
 
 所有执行都使用公开 `session_id`。调用时未传 ID，Harness 会生成 `session-...` 并通过
 `AgentResult.session_id` 返回；HITL 暂停后可以直接用该 ID 恢复，不存在应用层无法取得的
-隐藏 ephemeral ID。`stream` / `astream` 仍可显式接收 `session_id`。同一 ID 通过
+隐藏 ephemeral ID。由于当前 Streaming API 尚不返回统一结果封装，`stream` / `astream`
+必须显式传入非空 `session_id`；该 ID 可直接用于 HITL 恢复及 Session 清理。同一 ID 通过
 LangGraph Checkpointer 保持上下文，不同 ID 隔离；应用层不接触 `thread_id`。
 默认 Session namespace 使用稳定的 Agent name，因此重新创建同名 Agent 后仍可从
 持久化 Checkpointer 恢复。高级用户可用 `session_namespace="service-a"` 区分同名
@@ -74,9 +75,11 @@ agent.clear_session("session-001")
 await agent.aclear_session("session-002")
 ```
 
-`clear_session` 内部将公开 Session ID 转换为稳定 thread ID，再调用 Checkpointer 的删除
-能力；后端失败统一包装为 `PersistenceError`。Checkpointer/Store 的连接生命周期仍由
-创建它们的应用负责。该入口可供后续 retention policy 调用，本期不包含定时清理系统。
+`clear_session` 内部将公开 Session ID 转换为稳定 thread ID，并根据 Main checkpoint 中
+持久化的 SubAgent tool call 关系先清理派生 child checkpoint，再删除 Main checkpoint；
+应用层无需接触 child session。后端失败统一包装为 `PersistenceError`。Checkpointer/Store
+的连接生命周期仍由创建它们的应用负责。该入口可供后续 retention policy 调用，本期不包含
+定时清理系统。
 
 ## SubAgent
 

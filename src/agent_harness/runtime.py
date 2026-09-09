@@ -31,6 +31,15 @@ from .state import HARNESS_STATE_FIELDS
 from .strategy import AgentStrategy
 
 
+def _derive_child_session_id(
+    parent_thread_id: str, subagent_name: str, tool_call_id: str
+) -> str:
+    digest = hashlib.sha256(
+        f"{parent_thread_id}:{subagent_name}:{tool_call_id}".encode()
+    ).hexdigest()
+    return f"parent-call-{digest}"
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -227,6 +236,7 @@ class AgentRuntime:
         memory_id: str | None = None,
         **kwargs: Any,
     ) -> Iterator[Any]:
+        self._require_stream_session(session_id)
         state = self._input(value)
         state["runtime_metadata"] = {
             "memory_id": memory_id,
@@ -280,6 +290,7 @@ class AgentRuntime:
         memory_id: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
+        self._require_stream_session(session_id)
         state = self._input(value)
         state["runtime_metadata"] = {
             "memory_id": memory_id,
@@ -397,6 +408,63 @@ class AgentRuntime:
 
     async def ais_paused(self, *, session_id: str) -> bool:
         return bool(await self.apending_interrupts(session_id=session_id))
+
+    @staticmethod
+    def _require_stream_session(session_id: str | None) -> None:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise SessionError(
+                "stream and astream require an explicit non-empty session_id"
+            )
+
+    def _subagent_calls_for_session(
+        self, *, session_id: str
+    ) -> tuple[tuple[str, str], ...]:
+        """Read durable SubAgent tool-call relationships from the Main checkpoint."""
+        try:
+            config, _, _ = self._config(None, session_id)
+            return self._subagent_calls(self.graph.get_state(config).values)
+        except Exception as exc:
+            raise PersistenceError(
+                "Unable to inspect persistent SubAgent sessions", cause=exc
+            ) from exc
+
+    async def _asubagent_calls_for_session(
+        self, *, session_id: str
+    ) -> tuple[tuple[str, str], ...]:
+        try:
+            config, _, _ = self._config(None, session_id)
+            snapshot = await self.graph.aget_state(config)
+            return self._subagent_calls(snapshot.values)
+        except Exception as exc:
+            raise PersistenceError(
+                "Unable to inspect persistent SubAgent sessions asynchronously",
+                cause=exc,
+            ) from exc
+
+    def _child_session_id(
+        self, *, session_id: str, subagent_name: str, tool_call_id: str
+    ) -> str:
+        _, parent_thread_id, _ = self._config(None, session_id)
+        return _derive_child_session_id(parent_thread_id, subagent_name, tool_call_id)
+
+    def _subagent_calls(self, state: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+        subagent_names = set(self.definition.subagent_names)
+        calls: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for message in state.get("messages", []):
+            for call in getattr(message, "tool_calls", ()):
+                name = call.get("name")
+                call_id = call.get("id")
+                relationship = (name, call_id)
+                if (
+                    name in subagent_names
+                    and isinstance(call_id, str)
+                    and call_id
+                    and relationship not in seen
+                ):
+                    seen.add(relationship)
+                    calls.append(relationship)
+        return tuple(calls)
 
     def clear_session(self, *, session_id: str) -> None:
         try:

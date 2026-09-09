@@ -15,6 +15,7 @@ from agent_harness import (
     PersistenceError,
     PlanExecuteStrategy,
     RuntimeConfig,
+    SessionError,
     Skill,
     SkillLoader,
     SkillMetadata,
@@ -224,6 +225,114 @@ def test_agent_result_prefers_structured_output(persistent_defaults):
     assert result.status == "completed"
 
 
+def test_stream_requires_public_session_and_hitl_can_resume_and_clear(
+    persistent_defaults,
+):
+    saver, _ = persistent_defaults
+    calls = []
+
+    def sensitive(value: str) -> str:
+        calls.append(value)
+        return value
+
+    agent = create_agent(
+        name="stream-session",
+        instructions="act",
+        model=ResultModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call("sensitive", {"value": "stream"}, "stream-call")
+                    ],
+                ),
+                AIMessage(content="stream finished"),
+                AIMessage(content="fresh session"),
+            ]
+        ),
+        tools=[
+            require_approval(
+                StructuredTool.from_function(
+                    sensitive, name="sensitive", description="Sensitive action."
+                )
+            )
+        ],
+    )
+
+    with pytest.raises(SessionError, match="explicit non-empty session_id"):
+        agent.stream("would be hidden")
+    assert list(saver.backend.list(None)) == []
+
+    chunks = list(agent.stream("go", session_id="public-stream"))
+    assert chunks
+    assert agent.runtime.is_paused(session_id="public-stream")
+    completed = agent.resume(session_id="public-stream", decision="approve")
+    assert completed.status == "completed"
+    assert completed.output == "stream finished"
+    assert calls == ["stream"]
+
+    agent.clear_session("public-stream")
+    fresh = agent.invoke("again", session_id="public-stream")
+    assert fresh.output == "fresh session"
+    assert sum(isinstance(item, HumanMessage) for item in fresh.state["messages"]) == 1
+
+
+def test_astream_requires_public_session_and_hitl_can_resume_and_clear(
+    persistent_defaults,
+):
+    saver, _ = persistent_defaults
+    calls = []
+
+    def sensitive(value: str) -> str:
+        calls.append(value)
+        return value
+
+    agent = create_agent(
+        name="astream-session",
+        instructions="act",
+        model=ResultModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call("sensitive", {"value": "astream"}, "astream-call")
+                    ],
+                ),
+                AIMessage(content="astream finished"),
+                AIMessage(content="fresh async session"),
+            ]
+        ),
+        tools=[
+            require_approval(
+                StructuredTool.from_function(
+                    sensitive, name="sensitive", description="Sensitive action."
+                )
+            )
+        ],
+    )
+
+    async def run():
+        with pytest.raises(SessionError, match="explicit non-empty session_id"):
+            agent.astream("would be hidden")
+        assert list(saver.backend.list(None)) == []
+        chunks = [
+            chunk async for chunk in agent.astream("go", session_id="public-astream")
+        ]
+        assert chunks
+        assert await agent.runtime.ais_paused(session_id="public-astream")
+        completed = await agent.aresume(session_id="public-astream", decision="approve")
+        await agent.aclear_session("public-astream")
+        fresh = await agent.ainvoke("again", session_id="public-astream")
+        return completed, fresh
+
+    completed, fresh = asyncio.run(run())
+    assert completed.status == "completed"
+    assert completed.output == "astream finished"
+    assert fresh.output == "fresh async session"
+    assert sum(isinstance(item, HumanMessage) for item in fresh.state["messages"]) == 1
+    assert calls == ["astream"]
+
+
 def test_clear_session_sync_and_async_hide_thread_id(persistent_defaults):
     saver, _ = persistent_defaults
     sync_agent = create_agent(
@@ -278,6 +387,120 @@ def test_clear_session_wraps_backend_failure(persistent_defaults):
     assert isinstance(raised.value.cause, OSError)
     with pytest.raises(PersistenceError):
         agent.clear_session("")
+
+
+def test_clear_main_session_cascades_only_its_subagent_checkpoint(
+    persistent_defaults,
+):
+    saver, _ = persistent_defaults
+    child = create_agent(
+        name="cleanup-child",
+        instructions="finish delegated work",
+        model=ResultModel(
+            responses=[AIMessage(content="child A"), AIMessage(content="child B")]
+        ),
+    )
+    main = create_agent(
+        name="cleanup-main",
+        instructions="delegate",
+        model=ResultModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call("cleanup-child", {"task": "A"}, "child-call-A")
+                    ],
+                ),
+                AIMessage(content="main A"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call("cleanup-child", {"task": "B"}, "child-call-B")
+                    ],
+                ),
+                AIMessage(content="main B"),
+            ]
+        ),
+        subagents=[child],
+    )
+
+    main.invoke("A", session_id="main-A")
+    main.invoke("B", session_id="main-B")
+
+    def persisted_threads():
+        return {
+            item.config["configurable"]["thread_id"]
+            for item in saver.backend.list(None)
+        }
+
+    assert len(persisted_threads()) == 4
+    main.clear_session("main-A")
+    assert len(persisted_threads()) == 2
+    main.clear_session("main-B")
+    assert persisted_threads() == set()
+
+
+def test_aclear_main_session_removes_paused_subagent_hitl_checkpoint(
+    persistent_defaults,
+):
+    saver, _ = persistent_defaults
+
+    def sensitive(value: str) -> str:
+        return value
+
+    child = create_agent(
+        name="paused-cleanup-child",
+        instructions="use the sensitive tool",
+        model=ResultModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call("sensitive", {"value": "x"}, "sensitive-call")
+                    ],
+                )
+            ]
+        ),
+        tools=[
+            require_approval(
+                StructuredTool.from_function(
+                    sensitive, name="sensitive", description="Sensitive action."
+                )
+            )
+        ],
+    )
+    main = create_agent(
+        name="paused-cleanup-main",
+        instructions="delegate",
+        model=ResultModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "paused-delegate",
+                            {"task": "pause"},
+                            "paused-child-call",
+                        )
+                    ],
+                )
+            ]
+        ),
+        tools=[child.as_tool(name="paused-delegate")],
+    )
+
+    async def run():
+        paused = await main.ainvoke("go", session_id="paused-main")
+        assert paused.status == "paused"
+        threads = {
+            item.config["configurable"]["thread_id"]
+            for item in saver.backend.list(None)
+        }
+        assert len(threads) == 2
+        await main.aclear_session("paused-main")
+
+    asyncio.run(run())
+    assert list(saver.backend.list(None)) == []
 
 
 def test_skill_selector_is_replaceable_and_lexical_remains_default(

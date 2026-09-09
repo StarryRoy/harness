@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -16,7 +15,7 @@ from langgraph.types import interrupt
 from .definition import AgentDefinition
 from .errors import SubAgentError
 from .middleware import MiddlewarePipeline
-from .runtime import AgentRuntime
+from .runtime import AgentRuntime, _derive_child_session_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,9 +57,16 @@ class AgentResult(Mapping[str, Any]):
 
 
 class Agent:
-    def __init__(self, definition: AgentDefinition, runtime: AgentRuntime):
+    def __init__(
+        self,
+        definition: AgentDefinition,
+        runtime: AgentRuntime,
+        *,
+        subagents: Mapping[str, Agent] | None = None,
+    ):
         self.definition = definition
         self.runtime = runtime
+        self._subagents = dict(subagents or {})
 
     def invoke(
         self,
@@ -143,9 +149,27 @@ class Agent:
         return await self._aresult(state)
 
     def clear_session(self, session_id: str) -> None:
+        calls = self.runtime._subagent_calls_for_session(session_id=session_id)
+        for tool_name, call_id in calls:
+            child = self._subagents[tool_name]
+            child_session = self.runtime._child_session_id(
+                session_id=session_id,
+                subagent_name=child.definition.name,
+                tool_call_id=call_id,
+            )
+            child.clear_session(child_session)
         self.runtime.clear_session(session_id=session_id)
 
     async def aclear_session(self, session_id: str) -> None:
+        calls = await self.runtime._asubagent_calls_for_session(session_id=session_id)
+        for tool_name, call_id in calls:
+            child = self._subagents[tool_name]
+            child_session = self.runtime._child_session_id(
+                session_id=session_id,
+                subagent_name=child.definition.name,
+                tool_call_id=call_id,
+            )
+            await child.aclear_session(child_session)
         await self.runtime.aclear_session(session_id=session_id)
 
     def as_tool(
@@ -168,14 +192,16 @@ class Agent:
             parent_scope = parent.metadata.get("thread_id") or parent.session_id
             if not call_id or not parent_scope:
                 return None, None
-            digest = hashlib.sha256(
-                f"{parent_scope}:{self.definition.name}:{call_id}".encode()
-            ).hexdigest()
             runtime_metadata = parent.input.get("runtime_metadata", {})
             memory_id = runtime_metadata.get("memory_id")
             if self.runtime.memory is None:
                 memory_id = None
-            return f"parent-call-{digest}", memory_id
+            return (
+                _derive_child_session_id(
+                    parent_scope, self.definition.name, str(call_id)
+                ),
+                memory_id,
+            )
 
         def pause_payload(task: str, child_session: str) -> dict[str, Any]:
             return {
@@ -331,12 +357,14 @@ class Agent:
             )
             return result.as_dict()
 
-        return StructuredTool.from_function(
+        tool = StructuredTool.from_function(
             run,
             coroutine=arun,
             name=tool_name,
             description=tool_description,
         )
+        object.__setattr__(tool, "_harness_subagent", self)
+        return tool
 
     def _result(self, state: Mapping[str, Any]) -> AgentResult:
         metadata = dict(state.get("runtime_metadata", {}))

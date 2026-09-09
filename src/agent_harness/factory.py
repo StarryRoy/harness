@@ -114,6 +114,11 @@ def create_agent(
     }
     if duplicate_tools:
         raise ValueError(f"Duplicate tool names: {', '.join(sorted(duplicate_tools))}")
+    subagent_tools = {
+        tool.name: candidate
+        for tool in tools
+        if isinstance((candidate := getattr(tool, "_harness_subagent", None)), Agent)
+    }
 
     loader = SkillLoader()
     registry = SkillRegistry(selector=skill_selector)
@@ -162,7 +167,7 @@ def create_agent(
         response_format=response_format,
         state_schema=state_schema,
         middleware=resolved_middleware,
-        subagent_names=tuple(agent.definition.name for agent in subagents),
+        subagent_names=tuple(subagent_tools),
         runtime_config=config,
         store=resolved_store,
         memory=memory_config,
@@ -175,4 +180,4 @@ def create_agent(
         session_namespace=session_namespace,
         memory=memory_runtime,
     )
-    return Agent(definition, runtime)
+    return Agent(definition, runtime, subagents=subagent_tools)
