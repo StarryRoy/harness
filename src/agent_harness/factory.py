@@ -7,16 +7,20 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.store.memory import InMemoryStore
 
 from .agent import Agent
 from .definition import AgentDefinition, RuntimeConfig
 from .enterprise import GuardrailMiddleware, ModelFallbackMiddleware
 from .memory import LongTermMemory, MemoryConfig
 from .middleware import AgentMiddleware, default_middleware
+from .persistence import (
+    FileCheckpointSaver,
+    FileStore,
+    default_checkpoint_path,
+    default_store_path,
+)
 from .runtime import AgentRuntime
-from .skills import Skill, SkillLoader, SkillRegistry
+from .skills import Skill, SkillLoader, SkillRegistry, SkillSelector
 from .strategy import AgentStrategy, ReActStrategy
 
 _DEFAULT_MODEL: BaseChatModel | None = None
@@ -62,6 +66,7 @@ def create_agent(
     model: BaseChatModel | str | None = None,
     tools: Sequence[BaseTool] | None = None,
     skills: Sequence[Skill | str | Path] | None = None,
+    skill_selector: SkillSelector | None = None,
     subagents: Sequence[Agent] | None = None,
     response_format: Any | None = None,
     state_schema: type | None = None,
@@ -115,7 +120,7 @@ def create_agent(
         raise ValueError(f"Duplicate tool names: {', '.join(sorted(duplicate_tools))}")
 
     loader = SkillLoader()
-    registry = SkillRegistry()
+    registry = SkillRegistry(skill_selector)
     resolved_skills = []
     for item in skills or ():
         skill = item if isinstance(item, Skill) else loader.load(item)
@@ -136,7 +141,9 @@ def create_agent(
     else:
         raise TypeError("memory must be MemoryConfig, True, or None")
     resolved_store = (
-        store if store is not None else (InMemoryStore() if memory_config else None)
+        store
+        if store is not None
+        else (FileStore(default_store_path()) if memory_config else None)
     )
     memory_runtime = (
         LongTermMemory(resolved_store, memory_config, resolved_model)
@@ -163,7 +170,9 @@ def create_agent(
         definition,
         strategy or ReActStrategy(),
         registry,
-        checkpointer if checkpointer is not None else MemorySaver(),
+        checkpointer
+        if checkpointer is not None
+        else FileCheckpointSaver(default_checkpoint_path(session_namespace or name)),
         session_namespace=session_namespace,
         memory=memory_runtime,
     )

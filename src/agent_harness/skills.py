@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,7 @@ class Skill:
     resources: Mapping[str, Path] = field(default_factory=dict)
     script_files: Mapping[str, Path] = field(default_factory=dict)
     path: Path | None = None
+    assets: Mapping[str, Path] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -67,6 +69,8 @@ class Skill:
             sections.append("Available references: " + ", ".join(self.references))
         if self.resources:
             sections.append("Available resources: " + ", ".join(self.resources))
+        if self.assets:
+            sections.append("Available assets: " + ", ".join(self.assets))
         if self.script_files:
             sections.append("Available scripts: " + ", ".join(self.script_files))
         return "\n\n".join(filter(None, sections))
@@ -81,7 +85,7 @@ class Skill:
             ) from exc
 
     def read_resource(self, name: str) -> dict[str, Any]:
-        path = self._asset(self.resources, name, "resource")
+        path = self._asset({**self.resources, **self.assets}, name, "resource/asset")
         data = path.read_bytes()
         try:
             return {"name": name, "encoding": "utf-8", "content": data.decode("utf-8")}
@@ -130,6 +134,7 @@ class SkillLoader:
             )
         references = self._files(root, "references", metadata.name)
         resources = self._files(root, "resources", metadata.name)
+        assets = self._files(root, "assets", metadata.name)
         available_scripts = self._files(root, "scripts", metadata.name)
         declared_scripts: dict[str, Path] = {}
         for name in metadata.scripts:
@@ -140,12 +145,13 @@ class SkillLoader:
             self._validate_script(metadata.name, name)
             declared_scripts[name] = available_scripts[name]
         skill = Skill(
-            metadata,
-            instructions.strip(),
-            MappingProxyType(references),
-            MappingProxyType(resources),
-            MappingProxyType(declared_scripts),
-            root,
+            metadata=metadata,
+            instructions=instructions.strip(),
+            references=MappingProxyType(references),
+            resources=MappingProxyType(resources),
+            script_files=MappingProxyType(declared_scripts),
+            path=root,
+            assets=MappingProxyType(assets),
         )
         SkillValidator.validate_definition(skill)
         return skill
@@ -274,6 +280,7 @@ class SkillValidator:
             )
         SkillValidator._validate_assets(skill, "references", skill.references)
         SkillValidator._validate_assets(skill, "resources", skill.resources)
+        SkillValidator._validate_assets(skill, "assets", skill.assets)
         SkillValidator._validate_assets(skill, "scripts", skill.script_files)
 
     @staticmethod
@@ -310,12 +317,57 @@ class SkillValidator:
                 )
 
 
+class SkillSelector(ABC):
+    """Replaceable candidate-selection policy independent of skill storage."""
+
+    @abstractmethod
+    def select(
+        self, query: str, skills: tuple[Skill, ...], limit: int | None
+    ) -> tuple[Skill, ...]:
+        """Return ordered candidates for a user query."""
+
+
+class LexicalSkillSelector(SkillSelector):
+    """Token/name/tag and Chinese n-gram selector retained as the default."""
+
+    def select(
+        self, query: str, skills: tuple[Skill, ...], limit: int | None
+    ) -> tuple[Skill, ...]:
+        lowered = query.casefold()
+        tokens = set(re.findall(r"[a-z0-9_-]+", lowered))
+        query_cjk = SkillRegistry._cjk_ngrams(lowered)
+
+        def score(skill: Skill) -> tuple[int, str]:
+            fields = " ".join(
+                [skill.name, skill.metadata.description, *skill.metadata.tags]
+            ).casefold()
+            field_tokens = set(re.findall(r"[a-z0-9_-]+", fields))
+            points = len(tokens.intersection(field_tokens)) * 4
+            points += sum(
+                3 if len(g) == 3 else 2
+                for g in query_cjk.intersection(SkillRegistry._cjk_ngrams(fields))
+            )
+            points += sum(
+                6
+                for value in (skill.name, *skill.metadata.tags)
+                if value.casefold() in lowered
+            )
+            points += 8 if lowered in fields else 0
+            points += 4 if skill.metadata.description.casefold() in lowered else 0
+            return points, skill.identifier
+
+        ranked = sorted(skills, key=score, reverse=True)
+        selected = [item for item in ranked if score(item)[0] > 0] or ranked
+        return tuple(selected[:limit] if limit is not None else selected)
+
+
 class SkillRegistry:
     """One agent's isolated collection of versioned skills."""
 
-    def __init__(self) -> None:
+    def __init__(self, selector: SkillSelector | None = None) -> None:
         self._skills: dict[str, Skill] = {}
         self._by_name: dict[str, list[Skill]] = {}
+        self.selector = selector or LexicalSkillSelector()
 
     def register(self, skill: Skill) -> None:
         SkillValidator.validate_definition(skill)
@@ -428,33 +480,8 @@ class SkillRegistry:
     ) -> tuple[dict[str, str], ...]:
         skills = list(self._skills.values())
         if query:
-            lowered = query.casefold()
-            tokens = set(re.findall(r"[a-z0-9_-]+", lowered))
-            query_cjk = self._cjk_ngrams(lowered)
-
-            def score(skill: Skill) -> tuple[int, str]:
-                fields = " ".join(
-                    [skill.name, skill.metadata.description, *skill.metadata.tags]
-                ).casefold()
-                field_tokens = set(re.findall(r"[a-z0-9_-]+", fields))
-                field_cjk = self._cjk_ngrams(fields)
-                points = len(tokens.intersection(field_tokens)) * 4
-                points += sum(
-                    3 if len(gram) == 3 else 2
-                    for gram in query_cjk.intersection(field_cjk)
-                )
-                points += sum(
-                    6
-                    for value in (skill.name, *skill.metadata.tags)
-                    if value.casefold() in lowered
-                )
-                points += 8 if lowered in fields else 0
-                points += 4 if skill.metadata.description.casefold() in lowered else 0
-                return points, skill.identifier
-
-            ranked = sorted(skills, key=score, reverse=True)
-            matched = [item for item in ranked if score(item)[0] > 0]
-            skills = matched or ranked
+            skills = list(self.selector.select(query, tuple(skills), limit))
+            limit = None
         if limit is not None:
             skills = skills[:limit]
         return tuple(
@@ -498,10 +525,14 @@ class SkillScriptRunner:
     """Execute declared scripts only, using JSON stdin/stdout as one entry contract."""
 
     def __init__(
-        self, timeout_seconds: float = 30.0, max_output_bytes: int = 1_000_000
+        self,
+        timeout_seconds: float = 30.0,
+        max_output_bytes: int = 1_000_000,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
+        self.env = dict(env or {})
 
     def run(
         self, skill: Skill, script: str, arguments: Mapping[str, Any] | None = None
@@ -531,7 +562,7 @@ class SkillScriptRunner:
                 capture_output=True,
                 timeout=self.timeout_seconds,
                 cwd=str(scripts_root),
-                env=dict(os.environ),
+                env=self._environment(),
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -570,6 +601,15 @@ class SkillScriptRunner:
         return ScriptResult(
             skill.identifier, script, "success", result=result, stderr=stderr
         )
+
+    def _environment(self) -> dict[str, str]:
+        allowed = {
+            key: os.environ[key]
+            for key in ("PATH", "SYSTEMROOT", "WINDIR")
+            if key in os.environ
+        }
+        allowed.update(self.env)
+        return allowed
 
     @staticmethod
     def _command(path: Path) -> list[str]:

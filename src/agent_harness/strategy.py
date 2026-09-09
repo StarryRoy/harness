@@ -58,7 +58,10 @@ class _ExecutionStrategySupport:
         internal_tools = self._skill_tools(
             skills,
             set(business_tools),
-            SkillScriptRunner(definition.runtime_config.script_timeout_seconds),
+            SkillScriptRunner(
+                definition.runtime_config.script_timeout_seconds,
+                env=definition.runtime_config.script_env,
+            ),
             debug,
         )
         overlap = set(business_tools).intersection(tool.name for tool in internal_tools)
@@ -270,7 +273,9 @@ class _ExecutionStrategySupport:
 
         def route(
             state: Mapping[str, Any],
-        ) -> Literal["tools", "replan", "advance", "finalize", "format", "done"]:
+        ) -> Literal[
+            "tools", "replan", "advance", "fail", "finalize", "format", "done"
+        ]:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
                 if (
@@ -294,6 +299,8 @@ class _ExecutionStrategySupport:
                 )
                 if inadequate and int(plan.get("replan_count", 0)) < self.max_replans:
                     return "replan"
+                if inadequate:
+                    return "fail"
                 return "advance"
             if planning:
                 return "finalize"
@@ -352,10 +359,29 @@ class _ExecutionStrategySupport:
 
             def finalize_node(state: Mapping[str, Any]) -> dict[str, Any]:
                 plan = dict(state["plan"])
-                plan["status"] = "completed"
+                if plan.get("status") == "synthesizing":
+                    plan["status"] = "completed"
+                return {"plan": plan}
+
+            def fail_node(state: Mapping[str, Any]) -> dict[str, Any]:
+                plan = dict(state["plan"])
+                steps = [dict(step) for step in plan["steps"]]
+                index = int(plan["current_step"])
+                message = state["messages"][-1]
+                steps[index].update(
+                    status="failed", result=str(getattr(message, "content", ""))
+                )
+                plan.update(
+                    steps=steps,
+                    status="partially_completed"
+                    if any(step["status"] == "completed" for step in steps)
+                    else "failed",
+                )
                 return {"plan": plan}
 
             graph.add_node("finalize", finalize_node)
+            graph.add_node("fail", fail_node)
+            graph.add_edge("fail", END)
         if planning:
             planner = definition.model.with_structured_output(_PlanOutput)
 
@@ -366,7 +392,7 @@ class _ExecutionStrategySupport:
                     *context.build_messages(
                         state, middleware.current_execution().business_context
                     ),
-                    AIMessage(
+                    SystemMessage(
                         content=f"Create a plan of at most {self.max_steps} concrete steps."
                     ),
                 ]
@@ -415,7 +441,7 @@ class _ExecutionStrategySupport:
                     *context.build_messages(
                         state, middleware.current_execution().business_context
                     ),
-                    AIMessage(
+                    SystemMessage(
                         content=(
                             "Revise only the unfinished portion of the plan. Preserve completed work. "
                             f"Return 1..{remaining_limit} remaining concrete steps. "
@@ -481,6 +507,7 @@ class _ExecutionStrategySupport:
             destinations["advance"] = "advance"
             destinations["replan"] = "replan"
             destinations["finalize"] = "finalize"
+            destinations["fail"] = "fail"
         if definition.response_format is not None:
             destinations["format"] = "format"
         graph.add_conditional_edges("model", route, destinations)

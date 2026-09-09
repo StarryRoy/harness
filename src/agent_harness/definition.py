@@ -1,6 +1,6 @@
 """Immutable-ish configuration objects used by the runtime."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ class RuntimeConfig:
     timeout_seconds: float = 60.0
     call_limit: int = 48
     script_timeout_seconds: float = 30.0
+    script_env: Mapping[str, str] = field(default_factory=dict)
     context_policy: ContextPolicy = field(default_factory=ContextPolicy)
 
     def __post_init__(self) -> None:
@@ -35,6 +36,11 @@ class RuntimeConfig:
             raise ValueError("timeout values must be positive")
         if self.debug_format not in {"print", "json", "md"}:
             raise ValueError("debug_format must be 'print', 'json', or 'md'")
+        if not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in self.script_env.items()
+        ):
+            raise TypeError("script_env must map strings to strings")
 
 
 @dataclass(slots=True)

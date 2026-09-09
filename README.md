@@ -25,15 +25,22 @@ agent = create_agent(
     skills=["skills/analysis"],
 )
 
-state = agent.invoke("处理这个任务", session_id="session-001")
-print(state["messages"][-1].content)
+result = agent.invoke("处理这个任务", session_id="session-001")
+print(result.output, result.status, result.session_id)
+# 高级访问（并兼容原来的 Mapping 读取方式）
+print(result.state["messages"][-1].content)
 ```
 
 `invoke` / `ainvoke` / `stream` / `astream` 均支持 `session_id`。同一 ID 通过
 LangGraph Checkpointer 保持上下文，不同 ID 隔离；应用层不接触 `thread_id`。
+即使不传 ID，每次执行也会生成并在 `AgentResult.session_id` 返回稳定 ID，因而 HITL
+可直接据此恢复。`invoke / ainvoke / resume / aresume` 统一返回 `AgentResult`，包含
+`output`、`status`、`structured_response`、`hitl`、`plan` 和高级访问用的完整 `state`。
 默认 Session namespace 使用稳定的 Agent name，因此重新创建同名 Agent 后仍可从
-持久化 Checkpointer 恢复。高级用户可用 `session_namespace="service-a"` 区分同名
-Agent，并可向 `create_agent(checkpointer=...)` 传入其他 LangGraph Checkpointer。
+本地持久化 Checkpointer 恢复。高级用户可用 `session_namespace="service-a"` 区分同名
+Agent，并可向 `create_agent(checkpointer=...)` 传入官方 Postgres/SQLite 等 LangGraph
+Checkpointer。默认文件位置可由 `AGENT_HARNESS_CHECKPOINT_PATH` 设置。会话不再需要时
+调用 `clear_session(session_id=...)` 或 `aclear_session(...)` 主动清理。
 
 模型也可通过 `configure_default_model(model)` 配置一次后省略。若安装了可选的
 `langchain` 及相应 Provider 集成，也可传模型字符串或设置
@@ -144,7 +151,8 @@ SubAgent、Middleware、Session 与 Checkpoint runtime，结果 state 的 `plan`
 未完成步骤；已完成步骤及结果保持不变，并受 `max_replans` / `max_steps` 限制。
 
 通过 `memory=True` 启用基于 LangGraph Store 和
-LangMem manager 的跨会话记忆。开发默认使用 `InMemoryStore`，生产可传 `store=`；
+LangMem manager 的跨会话记忆。默认使用持久化 `FileStore`，生产可传 `store=` 替换为
+官方持久化 Store；
 应用只需在调用时同时提供稳定的 `memory_id`：
 
 ```python
@@ -153,7 +161,8 @@ agent.invoke("我喜欢简洁报告", session_id="A", memory_id="user-1")
 agent.invoke("按我的偏好写", session_id="B", memory_id="user-1")
 ```
 
-未传入 `store` 时 Harness 使用普通 `InMemoryStore`，适合开发和功能验证。需要语义相似度
+未传入 `store` 时 Harness 使用 `.agent_harness/store.pkl`（可由
+`AGENT_HARNESS_STORE_PATH` 设置）。需要语义相似度
 检索时，应由调用方传入已配置 vector index/embedding 的 LangGraph `BaseStore`；Harness
 不会选择或硬编码 embedding provider。Main 委派时会把稳定的 `memory_id` 传给已启用
 Memory 的 SubAgent；长期记忆仍按 `(namespace, agent_name, memory_id)` 隔离，因此
@@ -196,6 +205,8 @@ analysis/
 │   └── standard.md
 ├── resources/
 │   └── report.json
+├── assets/                 # 兼容常见 Skill 目录约定
+│   └── template.docx
 └── scripts/
     └── calculate.py
 ```
@@ -220,7 +231,10 @@ scripts: [calculate.py]
 
 模型起初只看到按当前任务动态筛选的 `name` 和 `description`。加载后只加入
 `SKILL.md` 指令以及可用资产名称；`references/` 和 `resources/` 由内部工具按需
-读取。Skill 在若干未使用会话轮次后自动卸载，也可调用 `unload_skill`。
+读取。`assets/` 与现有 `resources/` 同时支持。候选选择由 `SkillSelector` 抽象控制，
+默认 `LexicalSkillSelector` 保留 token/name/tag/CJK n-gram 算法，也可在
+`create_agent(skill_selector=...)` 注入 Embedding、LLM 或 Hybrid 实现。Skill 在若干
+未使用会话轮次后自动卸载，也可调用 `unload_skill`。
 
 声明脚本只能从该 Skill 的 `scripts/` 中执行，支持 `.py`、`.ps1`、`.sh`。统一
 协议是从 stdin 读取 JSON 参数，并向 stdout 输出 JSON（普通文本也可作为结果）：
@@ -233,7 +247,8 @@ arguments = json.load(sys.stdin)
 print(json.dumps({"result": arguments["value"] * 2}))
 ```
 
-这只是受控路径和超时/输出限制，不是完整安全沙箱；Skill 来源仍应可信。
+脚本只继承运行所需的最小环境（PATH 及 Windows 系统路径）；额外变量必须通过
+`RuntimeConfig(script_env={...})` 显式授予。这仍不是完整安全沙箱；Skill 来源应可信。
 
 ## Debug
 

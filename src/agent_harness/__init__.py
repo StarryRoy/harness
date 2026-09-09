@@ -24,6 +24,8 @@ from .errors import (
 from .factory import configure_default_model, create_agent
 from .mcp import load_mcp_tools
 from .memory import MemoryConfig
+from .persistence import FileCheckpointSaver, FileStore
+from .result import AgentResult
 from .middleware import (
     AgentExecution,
     AgentMiddleware,
@@ -40,6 +42,8 @@ from .skills import (
     Skill,
     SkillError,
     SkillLoader,
+    SkillSelector,
+    LexicalSkillSelector,
     SkillMetadata,
     SkillRegistry,
     SkillScriptRunner,
@@ -51,6 +55,7 @@ from .strategy import AgentStrategy, PlanExecuteStrategy, ReActStrategy
 __all__ = [
     "HARNESS_STATE_FIELDS",
     "Agent",
+    "AgentResult",
     "AgentContextManager",
     "AgentDefinition",
     "AgentError",
@@ -65,6 +70,8 @@ __all__ = [
     "HITLError",
     "MCPError",
     "MemoryConfig",
+    "FileCheckpointSaver",
+    "FileStore",
     "MemoryError",
     "MiddlewareError",
     "MiddlewarePipeline",
@@ -80,6 +87,8 @@ __all__ = [
     "Skill",
     "SkillError",
     "SkillLoader",
+    "SkillSelector",
+    "LexicalSkillSelector",
     "SkillMetadata",
     "SkillRegistry",
     "SkillScriptRunner",

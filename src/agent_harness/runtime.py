@@ -20,6 +20,7 @@ from .middleware import AgentExecution, MiddlewarePipeline
 from .skills import SkillRegistry
 from .state import HARNESS_STATE_FIELDS
 from .strategy import AgentStrategy
+from .result import AgentResult
 
 
 class AgentRuntime:
@@ -43,6 +44,7 @@ class AgentRuntime:
         )
         self.middleware = MiddlewarePipeline(definition.middleware, self.debug)
         self.memory = memory
+        self.checkpointer = checkpointer
         if session_namespace is not None and (
             not isinstance(session_namespace, str) or not session_namespace.strip()
         ):
@@ -90,13 +92,13 @@ class AgentRuntime:
 
     def _config(
         self, config: RunnableConfig | None, session_id: str | None
-    ) -> tuple[RunnableConfig, str, str | None]:
+    ) -> tuple[RunnableConfig, str, str]:
         if session_id is not None and (
             not isinstance(session_id, str) or not session_id.strip()
         ):
             raise ValueError("session_id must be a non-empty string")
-        public_id = session_id.strip() if session_id else None
-        scope = public_id or f"ephemeral-{uuid.uuid4().hex}"
+        public_id = session_id.strip() if session_id else uuid.uuid4().hex
+        scope = public_id
         thread_id = hashlib.sha256(f"{self._namespace}:{scope}".encode()).hexdigest()
         merged: dict[str, Any] = dict(config or {})
         configurable = dict(merged.get("configurable", {}))
@@ -109,6 +111,23 @@ class AgentRuntime:
             + 16,
         )
         return merged, thread_id, public_id
+
+    def _result(
+        self, state: Mapping[str, Any], config: RunnableConfig, session_id: str
+    ) -> AgentResult:
+        interrupts = tuple(self._snapshot_interrupts(self.graph.get_state(config)))
+        structured = state.get("structured_response")
+        messages = state.get("messages", [])
+        output = structured
+        if output is None and messages:
+            output = getattr(messages[-1], "content", messages[-1])
+        plan = state.get("plan")
+        status = (
+            "paused" if interrupts else str((plan or {}).get("status", "completed"))
+        )
+        return AgentResult(
+            output, status, session_id, structured, interrupts, plan, dict(state)
+        )
 
     def invoke(
         self,
@@ -145,7 +164,7 @@ class AgentRuntime:
                 result = self.middleware.after_agent(execution, result)
                 if self._completed(graph_config):
                     self._update_memory(result, memory_id)
-                return result
+                return self._result(result, graph_config, public_id)
             except Exception as exc:
                 execution.error = exc
                 self.debug.emit("ERROR", error=str(exc))
@@ -192,7 +211,7 @@ class AgentRuntime:
                 result = await self.middleware.aafter_agent(execution, result)
                 if self._completed(graph_config):
                     await self._aupdate_memory(result, memory_id)
-                return result
+                return self._result(result, graph_config, public_id)
             except Exception as exc:
                 execution.error = exc
                 self.debug.emit("ERROR", error=str(exc))
@@ -442,7 +461,7 @@ class AgentRuntime:
                 result = self.middleware.after_agent(execution, result)
                 if self._completed(config):
                     self._update_memory(result, memory_id)
-                return result
+                return self._result(result, config, public_id)
             except Exception as exc:
                 execution.error = exc
                 if not after_called:
@@ -480,7 +499,7 @@ class AgentRuntime:
                 result = await self.middleware.aafter_agent(execution, result)
                 if self._completed(config):
                     await self._aupdate_memory(result, memory_id)
-                return result
+                return self._result(result, config, public_id)
             except Exception as exc:
                 execution.error = exc
                 if not after_called:
@@ -490,3 +509,22 @@ class AgentRuntime:
                 raise HITLError(
                     "Unable to resume interrupted agent", cause=exc
                 ) from exc
+
+    def clear_session(self, *, session_id: str) -> None:
+        """Permanently delete every checkpoint belonging to a public session."""
+        _, thread_id, _ = self._config(None, session_id)
+        delete = getattr(self.checkpointer, "delete_thread", None)
+        if delete is None:
+            raise SessionError(
+                "Configured checkpointer does not support session deletion"
+            )
+        delete(thread_id)
+
+    async def aclear_session(self, *, session_id: str) -> None:
+        """Asynchronously delete every checkpoint belonging to a public session."""
+        _, thread_id, _ = self._config(None, session_id)
+        delete = getattr(self.checkpointer, "adelete_thread", None)
+        if delete is not None:
+            await delete(thread_id)
+            return
+        self.clear_session(session_id=session_id)

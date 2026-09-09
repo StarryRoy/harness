@@ -17,6 +17,7 @@ from .definition import AgentDefinition
 from .errors import SubAgentError
 from .middleware import MiddlewarePipeline
 from .runtime import AgentRuntime
+from .result import AgentResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +49,7 @@ class Agent:
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
         memory_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> AgentResult:
         return self.runtime.invoke(
             value, config, session_id=session_id, context=context, memory_id=memory_id
         )
@@ -61,7 +62,7 @@ class Agent:
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
         memory_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> AgentResult:
         return await self.runtime.ainvoke(
             value, config, session_id=session_id, context=context, memory_id=memory_id
         )
@@ -106,14 +107,20 @@ class Agent:
 
     def resume(
         self, *, session_id: str, decision: str | Mapping[str, Any]
-    ) -> dict[str, Any]:
+    ) -> AgentResult:
         """Resume a paused sensitive tool call with approve/reject/edit."""
         return self.runtime.resume(session_id=session_id, decision=decision)
 
     async def aresume(
         self, *, session_id: str, decision: str | Mapping[str, Any]
-    ) -> dict[str, Any]:
+    ) -> AgentResult:
         return await self.runtime.aresume(session_id=session_id, decision=decision)
+
+    def clear_session(self, *, session_id: str) -> None:
+        self.runtime.clear_session(session_id=session_id)
+
+    async def aclear_session(self, *, session_id: str) -> None:
+        await self.runtime.aclear_session(session_id=session_id)
 
     def as_tool(
         self, *, name: str | None = None, description: str | None = None
