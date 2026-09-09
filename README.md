@@ -15,7 +15,13 @@ python -m pip install -e . --no-deps
 ## 快速开始
 
 ```python
-from agent_harness import create_agent
+from agent_harness import configure_default_persistence, create_agent
+
+# 由应用启动层创建并管理官方 LangGraph 持久化实现。
+configure_default_persistence(
+    checkpointer=persistent_checkpointer,
+    store=persistent_store,
+)
 
 agent = create_agent(
     name="assistant",
@@ -25,19 +31,52 @@ agent = create_agent(
     skills=["skills/analysis"],
 )
 
-state = agent.invoke("处理这个任务", session_id="session-001")
-print(state["messages"][-1].content)
+result = agent.invoke("处理这个任务", session_id="session-001")
+print(result.output)
 ```
 
-`invoke` / `ainvoke` / `stream` / `astream` 均支持 `session_id`。同一 ID 通过
+`invoke`、`ainvoke`、`resume`、`aresume` 返回稳定的 `AgentResult`。普通应用读取
+`output`、`status`、`session_id`、`structured_output` 和 `interrupts`；需要诊断或
+高级编排时才读取完整的 `result.state`。状态为 `completed`、`paused` 或 `error`。
+启用 Structured Output 时，格式化结果同时作为 `output` 和 `structured_output` 返回。
+
+所有执行都使用公开 `session_id`。调用时未传 ID，Harness 会生成 `session-...` 并通过
+`AgentResult.session_id` 返回；HITL 暂停后可以直接用该 ID 恢复，不存在应用层无法取得的
+隐藏 ephemeral ID。`stream` / `astream` 仍可显式接收 `session_id`。同一 ID 通过
 LangGraph Checkpointer 保持上下文，不同 ID 隔离；应用层不接触 `thread_id`。
 默认 Session namespace 使用稳定的 Agent name，因此重新创建同名 Agent 后仍可从
 持久化 Checkpointer 恢复。高级用户可用 `session_namespace="service-a"` 区分同名
-Agent，并可向 `create_agent(checkpointer=...)` 传入其他 LangGraph Checkpointer。
+Agent，并可向 `create_agent(checkpointer=...)` 显式传入持久化 Checkpointer。
 
 模型也可通过 `configure_default_model(model)` 配置一次后省略。若安装了可选的
 `langchain` 及相应 Provider 集成，也可传模型字符串或设置
 `AGENT_HARNESS_MODEL`。
+
+## 持久化与 Session 生命周期
+
+Harness 不提供 RAM Checkpointer/Store fallback。每个 Agent 必须显式传入持久化
+`checkpointer=`，或先调用 `configure_default_persistence()` 配置全局默认值；两者都没有
+时，`create_agent()` 立即抛出 `PersistenceError`。已知内存 Checkpointer 和内存 Store
+会被拒绝。
+
+生产部署推荐使用 LangGraph 官方 PostgreSQL Checkpointer/Store，由应用启动层从外部配置
+读取连接信息、初始化 schema，并注入 Harness；Harness 不保存或硬编码数据库连接地址。
+本地开发可安装 `agent-harness[persistence-sqlite]` 并注入文件型 SQLite Checkpointer。
+同步与异步调用应选择支持相应接口的官方实现。
+
+```python
+configure_default_persistence(
+    checkpointer=postgres_checkpointer,
+    store=postgres_store,
+)
+
+agent.clear_session("session-001")
+await agent.aclear_session("session-002")
+```
+
+`clear_session` 内部将公开 Session ID 转换为稳定 thread ID，再调用 Checkpointer 的删除
+能力；后端失败统一包装为 `PersistenceError`。Checkpointer/Store 的连接生命周期仍由
+创建它们的应用负责。该入口可供后续 retention policy 调用，本期不包含定时清理系统。
 
 ## SubAgent
 
@@ -115,7 +154,7 @@ class BusinessState(TypedDict, total=False):
 
 
 agent = create_agent(..., state_schema=BusinessState)
-state = agent.invoke(
+result = agent.invoke(
     {"messages": [message], "project_id": "P-001"},
     context={"tenant": "acme"},
 )
@@ -124,9 +163,9 @@ state = agent.invoke(
 业务字段与 Harness State 在建图时合并。`messages`、`iteration`、
 `runtime_metadata`、`available_skills`、`loaded_skills`、`active_skill`、
 `skill_state`、`session_turn`、`summary`、`summarized_messages`、`context`、
-`pending_tool_calls`、`tool_call_index` 和 `structured_response` 是保留字段，业务
-Schema 不能覆盖。调用参数 `context=` 是单次执行的业务 Runtime Context，不写入
-会话 State。
+`structured_response`、`plan`、`step_failed`、`pending_tool_calls`、
+`tool_call_index` 和 `long_term_memories` 是完整的 Harness 保留字段，业务 Schema 不能
+覆盖。调用参数 `context=` 是单次执行的业务 Runtime Context，不写入会话 State。
 
 长会话达到消息或 token 阈值后，由 LangMem `summarize_messages` 压缩旧消息并保留
 近期上下文；Harness 只提供默认阈值和接线。模型上下文始终由“压缩快照 + 快照后新增
@@ -141,20 +180,24 @@ Schema 不能覆盖。调用参数 `context=` 是单次执行的业务 Runtime C
 `with_structured_output()` 生成有界计划，执行阶段继续复用相同 Tool、Skill、
 SubAgent、Middleware、Session 与 Checkpoint runtime，结果 state 的 `plan` 包含
 `steps`、`current_step`、`status` 和 `replan_count`。步骤失败或结果明显不足时只重排
-未完成步骤；已完成步骤及结果保持不变，并受 `max_replans` / `max_steps` 限制。
+未完成步骤；已完成步骤及结果保持不变，并受 `max_replans` / `max_steps` 限制。Step 状态
+为 `pending/completed/failed/skipped`；Plan 状态为
+`executing/synthesizing/completed/partial/failed`。重规划耗尽后，失败步骤不会被误标为
+completed：无成功步骤时 Plan 为 failed，已有部分成果时为 partial。Planner/Replanner
+控制指令使用 SystemMessage，不伪造 Assistant 响应。
 
-通过 `memory=True` 启用基于 LangGraph Store 和
-LangMem manager 的跨会话记忆。开发默认使用 `InMemoryStore`，生产可传 `store=`；
-应用只需在调用时同时提供稳定的 `memory_id`：
+通过 `memory=True` 启用基于持久化 LangGraph Store 和 LangMem manager 的跨会话记忆。
+启用时必须显式传入 `store=persistent_store`，或配置全局 persistent Store；缺失时在创建
+Agent 阶段抛出 `PersistenceError`。应用调用时提供稳定的 `memory_id`：
 
 ```python
-agent = create_agent(..., memory=True)
+agent = create_agent(..., memory=True, store=persistent_store)
 agent.invoke("我喜欢简洁报告", session_id="A", memory_id="user-1")
 agent.invoke("按我的偏好写", session_id="B", memory_id="user-1")
 ```
 
-未传入 `store` 时 Harness 使用普通 `InMemoryStore`，适合开发和功能验证。需要语义相似度
-检索时，应由调用方传入已配置 vector index/embedding 的 LangGraph `BaseStore`；Harness
+需要语义相似度检索时，应由调用方传入已配置 vector index/embedding 的持久化 LangGraph
+`BaseStore`；Harness
 不会选择或硬编码 embedding provider。Main 委派时会把稳定的 `memory_id` 传给已启用
 Memory 的 SubAgent；长期记忆仍按 `(namespace, agent_name, memory_id)` 隔离，因此
 SubAgent A/B 和 Main 不会读取彼此的记忆。
@@ -175,7 +218,7 @@ MCP 不使用专属 runtime。安装 `agent-harness[mcp]` 后，调用异步
 
 ## 错误边界
 
-Harness 在应用边界提供稳定的 `AgentError` 子类。Model、Session、Memory、HITL、MCP
+Harness 在应用边界提供稳定的 `AgentError` 子类。Model、Session、Persistence、Memory、HITL、MCP
 以及 Strategy 错误会保留原始异常为 `cause`；Middleware 的 before/after hook 错误包装为
 `MiddlewareError`，未知 Tool 包装为 `ToolError`。普通 Tool 的可恢复执行失败仍作为
 observation 写回模型，使 Agent 可以自行修正；SubAgent 为保持隔离不会向 Main Agent 抛出
@@ -194,7 +237,7 @@ analysis/
 ├── SKILL.md
 ├── references/
 │   └── standard.md
-├── resources/
+├── assets/
 │   └── report.json
 └── scripts/
     └── calculate.py
@@ -211,16 +254,20 @@ dependencies: [common_rules@1.0]
 scripts: [calculate.py]
 ---
 
-按规范分析；需要时读取 reference/resource 或运行声明脚本。
+按规范分析；需要时读取 reference/asset 或运行声明脚本。
 ```
 
 支持同名不同版本（如 `analysis@1.0`、`analysis@2.0`）。不带版本引用在存在多个
 版本时解析到最高版本。创建 Agent 时检查目录、Metadata、依赖缺失和循环依赖；
 加载前检查 `required_tools` 并按拓扑顺序加载依赖。
 
-模型起初只看到按当前任务动态筛选的 `name` 和 `description`。加载后只加入
-`SKILL.md` 指令以及可用资产名称；`references/` 和 `resources/` 由内部工具按需
-读取。Skill 在若干未使用会话轮次后自动卸载，也可调用 `unload_skill`。
+模型起初只看到按当前任务动态筛选的 `name` 和 `description`。默认
+`LexicalSkillSelector` 保持原有字面/CJK 匹配行为；可通过
+`create_agent(skill_selector=custom_selector)` 注入自定义 `SkillSelector`，Harness 不绑定
+embedding provider。加载后只加入 `SKILL.md` 指令以及可用资产名称；`references/` 和
+`assets/` 由内部工具按需读取。旧 `resources/` 目录继续兼容，但新 Skill 推荐使用
+`references/assets/scripts`。Skill 在若干未使用会话轮次后自动卸载，也可调用
+`unload_skill`。
 
 声明脚本只能从该 Skill 的 `scripts/` 中执行，支持 `.py`、`.ps1`、`.sh`。统一
 协议是从 stdin 读取 JSON 参数，并向 stdout 输出 JSON（普通文本也可作为结果）：
@@ -233,7 +280,10 @@ arguments = json.load(sys.stdin)
 print(json.dumps({"result": arguments["value"] * 2}))
 ```
 
-这只是受控路径和超时/输出限制，不是完整安全沙箱；Skill 来源仍应可信。
+脚本默认只获得运行所需的少量平台环境变量，不继承完整 `os.environ`。需要的变量必须通过
+`RuntimeConfig(script_env_allowlist=("APP_REGION",))` 显式允许；API Key、数据库密码和
+Token 不会因父进程环境而自动暴露。该机制继续保留受控路径、timeout、stdout 大小限制及
+JSON stdin/stdout 合约，但不是完整安全沙箱；Skill 来源仍应可信。
 
 ## Debug
 

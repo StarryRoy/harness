@@ -58,7 +58,10 @@ class _ExecutionStrategySupport:
         internal_tools = self._skill_tools(
             skills,
             set(business_tools),
-            SkillScriptRunner(definition.runtime_config.script_timeout_seconds),
+            SkillScriptRunner(
+                definition.runtime_config.script_timeout_seconds,
+                env_allowlist=definition.runtime_config.script_env_allowlist,
+            ),
             debug,
         )
         overlap = set(business_tools).intersection(tool.name for tool in internal_tools)
@@ -83,7 +86,7 @@ class _ExecutionStrategySupport:
                     "Execute only the current plan step. Use tools when useful and give a concise "
                     "step result when complete."
                 )
-                if plan.get("status") == "synthesizing":
+                if plan.get("status") in {"synthesizing", "partial", "failed"}:
                     directive = (
                         "Synthesize the completed plan results into the final answer."
                     )
@@ -270,7 +273,9 @@ class _ExecutionStrategySupport:
 
         def route(
             state: Mapping[str, Any],
-        ) -> Literal["tools", "replan", "advance", "finalize", "format", "done"]:
+        ) -> Literal[
+            "tools", "replan", "advance", "fail", "finalize", "format", "done"
+        ]:
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
                 if (
@@ -284,6 +289,8 @@ class _ExecutionStrategySupport:
             if planning and state.get("plan", {}).get("status") not in {
                 "synthesizing",
                 "completed",
+                "partial",
+                "failed",
             }:
                 plan = state["plan"]
                 content = str(getattr(message, "content", "")).strip().lower()
@@ -294,6 +301,8 @@ class _ExecutionStrategySupport:
                 )
                 if inadequate and int(plan.get("replan_count", 0)) < self.max_replans:
                     return "replan"
+                if inadequate:
+                    return "fail"
                 return "advance"
             if planning:
                 return "finalize"
@@ -310,6 +319,28 @@ class _ExecutionStrategySupport:
             plan.update(steps=steps, current_step=index)
             if index >= len(steps):
                 plan["status"] = "synthesizing"
+            debug.emit("PLAN STEP", current_step=index, status=plan["status"])
+            return {"plan": plan, "step_failed": False}
+
+        def fail_step_node(state: Mapping[str, Any]) -> dict[str, Any]:
+            plan = dict(state["plan"])
+            steps = [dict(step) for step in plan["steps"]]
+            index = int(plan["current_step"])
+            message = state["messages"][-1]
+            failure = str(getattr(message, "content", "")).strip()
+            steps[index]["status"] = "failed"
+            steps[index]["result"] = failure or "Step failed without a result"
+            for step in steps[index + 1 :]:
+                step["status"] = "skipped"
+            plan.update(
+                steps=steps,
+                current_step=len(steps),
+                status=(
+                    "partial"
+                    if any(step["status"] == "completed" for step in steps[:index])
+                    else "failed"
+                ),
+            )
             debug.emit("PLAN STEP", current_step=index, status=plan["status"])
             return {"plan": plan, "step_failed": False}
 
@@ -352,7 +383,8 @@ class _ExecutionStrategySupport:
 
             def finalize_node(state: Mapping[str, Any]) -> dict[str, Any]:
                 plan = dict(state["plan"])
-                plan["status"] = "completed"
+                if plan.get("status") == "synthesizing":
+                    plan["status"] = "completed"
                 return {"plan": plan}
 
             graph.add_node("finalize", finalize_node)
@@ -362,14 +394,15 @@ class _ExecutionStrategySupport:
             def plan_node(
                 state: Mapping[str, Any], config: RunnableConfig
             ) -> dict[str, Any]:
-                request = [
-                    *context.build_messages(
-                        state, middleware.current_execution().business_context
-                    ),
-                    AIMessage(
+                request = context.build_messages(
+                    state, middleware.current_execution().business_context
+                )
+                request.insert(
+                    1,
+                    SystemMessage(
                         content=f"Create a plan of at most {self.max_steps} concrete steps."
                     ),
-                ]
+                )
                 value = call_model(planner, state, config, request, "planner")
                 raw_steps = (
                     value.get("steps", [])
@@ -402,6 +435,8 @@ class _ExecutionStrategySupport:
             graph.add_node("planner", plan_node)
             graph.add_node("advance", advance_node)
             graph.add_edge("advance", "model")
+            graph.add_node("fail", fail_step_node)
+            graph.add_edge("fail", "model")
 
             def replan_node(
                 state: Mapping[str, Any], config: RunnableConfig
@@ -411,11 +446,12 @@ class _ExecutionStrategySupport:
                     dict(step) for step in plan["steps"][: int(plan["current_step"])]
                 ]
                 remaining_limit = self.max_steps - len(completed)
-                request = [
-                    *context.build_messages(
-                        state, middleware.current_execution().business_context
-                    ),
-                    AIMessage(
+                request = context.build_messages(
+                    state, middleware.current_execution().business_context
+                )
+                request.insert(
+                    1,
+                    SystemMessage(
                         content=(
                             "Revise only the unfinished portion of the plan. Preserve completed work. "
                             f"Return 1..{remaining_limit} remaining concrete steps. "
@@ -423,7 +459,7 @@ class _ExecutionStrategySupport:
                             f"{plan['steps'][int(plan['current_step'])]}."
                         )
                     ),
-                ]
+                )
                 value = call_model(planner, state, config, request, "replanner")
                 raw = (
                     value.get("steps", [])
@@ -480,6 +516,7 @@ class _ExecutionStrategySupport:
         if planning:
             destinations["advance"] = "advance"
             destinations["replan"] = "replan"
+            destinations["fail"] = "fail"
             destinations["finalize"] = "finalize"
         if definition.response_format is not None:
             destinations["format"] = "format"
@@ -552,6 +589,10 @@ class _ExecutionStrategySupport:
             """Read one named text or binary resource from an already loaded skill."""
             return registry.get(skill).read_resource(name)
 
+        def read_skill_asset(skill: str, name: str) -> dict[str, Any]:
+            """Read one named text or binary asset from an already loaded skill."""
+            return registry.get(skill).read_asset(name)
+
         def run_skill_script(
             skill: str, script: str, arguments: dict[str, Any] | None = None
         ) -> dict[str, Any]:
@@ -576,6 +617,10 @@ class _ExecutionStrategySupport:
                     read_skill_resource, name="read_skill_resource"
                 )
             )
+        if any(skill.assets for skill in registry.list()):
+            tools.append(
+                StructuredTool.from_function(read_skill_asset, name="read_skill_asset")
+            )
         if any(skill.script_files for skill in registry.list()):
             tools.append(
                 StructuredTool.from_function(run_skill_script, name="run_skill_script")
@@ -598,6 +643,7 @@ class _ExecutionStrategySupport:
         if call["name"] not in {
             "read_skill_reference",
             "read_skill_resource",
+            "read_skill_asset",
             "run_skill_script",
         }:
             return
@@ -638,6 +684,7 @@ class _ExecutionStrategySupport:
         elif call["name"] in {
             "read_skill_reference",
             "read_skill_resource",
+            "read_skill_asset",
             "run_skill_script",
         }:
             identifier = registry.get(call["args"]["skill"]).identifier

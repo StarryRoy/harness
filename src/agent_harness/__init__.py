@@ -1,6 +1,6 @@
 """Public API for the agent harness."""
 
-from .agent import Agent, SubAgentResult
+from .agent import Agent, AgentResult, SubAgentResult
 from .context import AgentContextManager, ContextPolicy
 from .definition import AgentDefinition, RuntimeConfig
 from .enterprise import (
@@ -16,6 +16,7 @@ from .errors import (
     MemoryError,
     MiddlewareError,
     ModelError,
+    PersistenceError,
     SessionError,
     StrategyError,
     SubAgentError,
@@ -35,7 +36,9 @@ from .middleware import (
     ToolRequest,
     default_middleware,
 )
+from .persistence import PersistenceConfig, configure_default_persistence
 from .skills import (
+    LexicalSkillSelector,
     ScriptResult,
     Skill,
     SkillError,
@@ -43,6 +46,7 @@ from .skills import (
     SkillMetadata,
     SkillRegistry,
     SkillScriptRunner,
+    SkillSelector,
     SkillValidator,
 )
 from .state import HARNESS_STATE_FIELDS, AgentState, compose_state_schema
@@ -56,6 +60,7 @@ __all__ = [
     "AgentError",
     "AgentExecution",
     "AgentMiddleware",
+    "AgentResult",
     "AgentState",
     "AgentStrategy",
     "CallLimitMiddleware",
@@ -63,6 +68,7 @@ __all__ = [
     "GuardrailMiddleware",
     "GuardrailResult",
     "HITLError",
+    "LexicalSkillSelector",
     "MCPError",
     "MemoryConfig",
     "MemoryError",
@@ -71,6 +77,8 @@ __all__ = [
     "ModelError",
     "ModelFallbackMiddleware",
     "ModelRequest",
+    "PersistenceConfig",
+    "PersistenceError",
     "PlanExecuteStrategy",
     "ReActStrategy",
     "RetryMiddleware",
@@ -83,6 +91,7 @@ __all__ = [
     "SkillMetadata",
     "SkillRegistry",
     "SkillScriptRunner",
+    "SkillSelector",
     "SkillValidator",
     "StrategyError",
     "SubAgentError",
@@ -92,6 +101,7 @@ __all__ = [
     "ToolRequest",
     "compose_state_schema",
     "configure_default_model",
+    "configure_default_persistence",
     "create_agent",
     "default_middleware",
     "load_mcp_tools",

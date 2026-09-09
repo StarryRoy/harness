@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -35,6 +35,28 @@ class SubAgentResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class AgentResult(Mapping[str, Any]):
+    """Stable application result with opt-in access to the complete graph state."""
+
+    output: Any
+    status: Literal["completed", "paused", "error"]
+    session_id: str
+    structured_output: Any = None
+    interrupts: tuple[Any, ...] = ()
+    metadata: Mapping[str, Any] | None = None
+    state: Mapping[str, Any] | None = None
+
+    def __getitem__(self, key: str) -> Any:
+        return (self.state or {})[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.state or {})
+
+    def __len__(self) -> int:
+        return len(self.state or {})
+
+
 class Agent:
     def __init__(self, definition: AgentDefinition, runtime: AgentRuntime):
         self.definition = definition
@@ -48,10 +70,11 @@ class Agent:
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
         memory_id: str | None = None,
-    ) -> dict[str, Any]:
-        return self.runtime.invoke(
+    ) -> AgentResult:
+        state = self.runtime.invoke(
             value, config, session_id=session_id, context=context, memory_id=memory_id
         )
+        return self._result(state)
 
     async def ainvoke(
         self,
@@ -61,10 +84,11 @@ class Agent:
         session_id: str | None = None,
         context: Mapping[str, Any] | None = None,
         memory_id: str | None = None,
-    ) -> dict[str, Any]:
-        return await self.runtime.ainvoke(
+    ) -> AgentResult:
+        state = await self.runtime.ainvoke(
             value, config, session_id=session_id, context=context, memory_id=memory_id
         )
+        return await self._aresult(state)
 
     def stream(
         self,
@@ -106,14 +130,23 @@ class Agent:
 
     def resume(
         self, *, session_id: str, decision: str | Mapping[str, Any]
-    ) -> dict[str, Any]:
+    ) -> AgentResult:
         """Resume a paused sensitive tool call with approve/reject/edit."""
-        return self.runtime.resume(session_id=session_id, decision=decision)
+        return self._result(
+            self.runtime.resume(session_id=session_id, decision=decision)
+        )
 
     async def aresume(
         self, *, session_id: str, decision: str | Mapping[str, Any]
-    ) -> dict[str, Any]:
-        return await self.runtime.aresume(session_id=session_id, decision=decision)
+    ) -> AgentResult:
+        state = await self.runtime.aresume(session_id=session_id, decision=decision)
+        return await self._aresult(state)
+
+    def clear_session(self, session_id: str) -> None:
+        self.runtime.clear_session(session_id=session_id)
+
+    async def aclear_session(self, session_id: str) -> None:
+        await self.runtime.aclear_session(session_id=session_id)
 
     def as_tool(
         self, *, name: str | None = None, description: str | None = None
@@ -303,6 +336,63 @@ class Agent:
             coroutine=arun,
             name=tool_name,
             description=tool_description,
+        )
+
+    def _result(self, state: Mapping[str, Any]) -> AgentResult:
+        metadata = dict(state.get("runtime_metadata", {}))
+        session_id = str(metadata.get("session_id", ""))
+        interrupts = tuple(
+            self.runtime.pending_interrupts(session_id=session_id) if session_id else ()
+        )
+        return self._build_result(state, session_id, interrupts)
+
+    async def _aresult(self, state: Mapping[str, Any]) -> AgentResult:
+        metadata = dict(state.get("runtime_metadata", {}))
+        session_id = str(metadata.get("session_id", ""))
+        interrupts = tuple(
+            await self.runtime.apending_interrupts(session_id=session_id)
+            if session_id
+            else ()
+        )
+        return self._build_result(state, session_id, interrupts)
+
+    def _build_result(
+        self,
+        state: Mapping[str, Any],
+        session_id: str,
+        interrupts: tuple[Any, ...],
+    ) -> AgentResult:
+        structured = state.get("structured_response")
+        output = structured
+        if "structured_response" not in state:
+            messages = state.get("messages", [])
+            final = next(
+                (
+                    message
+                    for message in reversed(messages)
+                    if isinstance(message, AIMessage)
+                ),
+                None,
+            )
+            output = final.content if final is not None else None
+        plan_status = state.get("plan", {}).get("status")
+        status: Literal["completed", "paused", "error"] = "completed"
+        if interrupts:
+            status = "paused"
+        elif plan_status == "failed":
+            status = "error"
+        return AgentResult(
+            output=output,
+            status=status,
+            session_id=session_id,
+            structured_output=structured,
+            interrupts=interrupts,
+            metadata={
+                "agent": self.definition.name,
+                "iteration": state.get("iteration", 0),
+                "plan_status": plan_status,
+            },
+            state=state,
         )
 
     def _subagent_result(self, state: Mapping[str, Any]) -> SubAgentResult:

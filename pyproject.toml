@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 memory = []
 mcp = ["langchain-mcp-adapters>=0.1,<1"]
+persistence-sqlite = ["langgraph-checkpoint-sqlite>=3,<4"]
+persistence-postgres = ["langgraph-checkpoint-postgres>=3,<4"]
 enterprise = ["langmem==0.0.30", "langchain-mcp-adapters>=0.1,<1"]
 
 [tool.hatch.build.targets.wheel]

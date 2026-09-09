@@ -34,6 +34,8 @@ from agent_harness.middleware import (
     ToolRequest,
 )
 
+pytestmark = pytest.mark.usefixtures("persistent_defaults")
+
 
 class RecordingModel(FakeMessagesListChatModel):
     seen: list[list[object]] = Field(default_factory=list)

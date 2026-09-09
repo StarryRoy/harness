@@ -35,6 +35,10 @@ class SessionError(AgentError):
     pass
 
 
+class PersistenceError(AgentError):
+    pass
+
+
 class MemoryError(AgentError):
     pass
 

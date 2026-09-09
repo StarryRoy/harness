@@ -24,6 +24,8 @@ from agent_harness import (
     require_approval,
 )
 
+pytestmark = pytest.mark.usefixtures("persistent_defaults")
+
 
 class HarnessFakeModel(FakeMessagesListChatModel):
     bound_names: list[str] = Field(default_factory=list)

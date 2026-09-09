@@ -24,6 +24,7 @@ class RuntimeConfig:
     timeout_seconds: float = 60.0
     call_limit: int = 48
     script_timeout_seconds: float = 30.0
+    script_env_allowlist: tuple[str, ...] = ()
     context_policy: ContextPolicy = field(default_factory=ContextPolicy)
 
     def __post_init__(self) -> None:
@@ -33,6 +34,17 @@ class RuntimeConfig:
             raise ValueError("retry_attempts and call_limit must be at least 1")
         if self.timeout_seconds <= 0 or self.script_timeout_seconds <= 0:
             raise ValueError("timeout values must be positive")
+        self.script_env_allowlist = tuple(self.script_env_allowlist)
+        if any(
+            not isinstance(name, str)
+            or not name.strip()
+            or "=" in name
+            or "\x00" in name
+            for name in self.script_env_allowlist
+        ):
+            raise ValueError(
+                "script_env_allowlist contains an invalid environment name"
+            )
         if self.debug_format not in {"print", "json", "md"}:
             raise ValueError("debug_format must be 'print', 'json', or 'md'")
 

@@ -5,6 +5,8 @@ langmem==0.0.30
 PyYAML>=6.0,<7
 # Optional Phase 3 integrations (install with `pip install -e .[enterprise]`)
 # langchain-mcp-adapters>=0.1,<1
+# Persistent local development: `pip install -e .[persistence-sqlite]`
+# Production PostgreSQL: `pip install -e .[persistence-postgres]`
 
 # 本地开发与测试依赖
 pytest>=8.0,<9

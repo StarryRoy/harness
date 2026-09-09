@@ -7,16 +7,16 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.store.memory import InMemoryStore
 
 from .agent import Agent
 from .definition import AgentDefinition, RuntimeConfig
 from .enterprise import GuardrailMiddleware, ModelFallbackMiddleware
+from .errors import PersistenceError
 from .memory import LongTermMemory, MemoryConfig
 from .middleware import AgentMiddleware, default_middleware
+from .persistence import default_persistence, validate_checkpointer, validate_store
 from .runtime import AgentRuntime
-from .skills import Skill, SkillLoader, SkillRegistry
+from .skills import Skill, SkillLoader, SkillRegistry, SkillSelector
 from .strategy import AgentStrategy, ReActStrategy
 
 _DEFAULT_MODEL: BaseChatModel | None = None
@@ -62,6 +62,7 @@ def create_agent(
     model: BaseChatModel | str | None = None,
     tools: Sequence[BaseTool] | None = None,
     skills: Sequence[Skill | str | Path] | None = None,
+    skill_selector: SkillSelector | None = None,
     subagents: Sequence[Agent] | None = None,
     response_format: Any | None = None,
     state_schema: type | None = None,
@@ -115,13 +116,18 @@ def create_agent(
         raise ValueError(f"Duplicate tool names: {', '.join(sorted(duplicate_tools))}")
 
     loader = SkillLoader()
-    registry = SkillRegistry()
+    registry = SkillRegistry(selector=skill_selector)
     resolved_skills = []
     for item in skills or ():
         skill = item if isinstance(item, Skill) else loader.load(item)
         registry.register(skill)
         resolved_skills.append(skill)
     registry.validate()
+
+    persistence = default_persistence()
+    resolved_checkpointer = validate_checkpointer(
+        checkpointer if checkpointer is not None else persistence.checkpointer
+    )
 
     resolved_model = _resolve_model(model)
     memory_config: MemoryConfig | None
@@ -135,9 +141,11 @@ def create_agent(
         memory_config = None
     else:
         raise TypeError("memory must be MemoryConfig, True, or None")
-    resolved_store = (
-        store if store is not None else (InMemoryStore() if memory_config else None)
-    )
+    resolved_store = store if store is not None else persistence.store
+    if resolved_store is not None:
+        resolved_store = validate_store(resolved_store)
+    if memory_config is not None and resolved_store is None:
+        raise PersistenceError("Long-term memory requires a persistent LangGraph Store")
     memory_runtime = (
         LongTermMemory(resolved_store, memory_config, resolved_model)
         if memory_config
@@ -163,7 +171,7 @@ def create_agent(
         definition,
         strategy or ReActStrategy(),
         registry,
-        checkpointer if checkpointer is not None else MemorySaver(),
+        resolved_checkpointer,
         session_namespace=session_namespace,
         memory=memory_runtime,
     )

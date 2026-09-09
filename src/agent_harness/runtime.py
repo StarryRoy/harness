@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import inspect
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
@@ -14,9 +16,16 @@ from langgraph.types import Command
 from .context import AgentContextManager
 from .debug import DebugHandler
 from .definition import AgentDefinition
-from .errors import AgentError, HITLError, SessionError, StrategyError
+from .errors import (
+    AgentError,
+    HITLError,
+    PersistenceError,
+    SessionError,
+    StrategyError,
+)
 from .memory import LongTermMemory
 from .middleware import AgentExecution, MiddlewarePipeline
+from .persistence import validate_checkpointer
 from .skills import SkillRegistry
 from .state import HARNESS_STATE_FIELDS
 from .strategy import AgentStrategy
@@ -43,6 +52,7 @@ class AgentRuntime:
         )
         self.middleware = MiddlewarePipeline(definition.middleware, self.debug)
         self.memory = memory
+        self.checkpointer = validate_checkpointer(checkpointer)
         if session_namespace is not None and (
             not isinstance(session_namespace, str) or not session_namespace.strip()
         ):
@@ -59,7 +69,7 @@ class AgentRuntime:
                 self.debug,
                 context=self.context,
                 middleware=self.middleware,
-                checkpointer=checkpointer,
+                checkpointer=self.checkpointer,
             )
         except (TypeError, ValueError, AgentError):
             raise
@@ -90,14 +100,15 @@ class AgentRuntime:
 
     def _config(
         self, config: RunnableConfig | None, session_id: str | None
-    ) -> tuple[RunnableConfig, str, str | None]:
+    ) -> tuple[RunnableConfig, str, str]:
         if session_id is not None and (
             not isinstance(session_id, str) or not session_id.strip()
         ):
             raise ValueError("session_id must be a non-empty string")
-        public_id = session_id.strip() if session_id else None
-        scope = public_id or f"ephemeral-{uuid.uuid4().hex}"
-        thread_id = hashlib.sha256(f"{self._namespace}:{scope}".encode()).hexdigest()
+        public_id = session_id.strip() if session_id else f"session-{uuid.uuid4().hex}"
+        thread_id = hashlib.sha256(
+            f"{self._namespace}:{public_id}".encode()
+        ).hexdigest()
         merged: dict[str, Any] = dict(config or {})
         configurable = dict(merged.get("configurable", {}))
         configurable["thread_id"] = thread_id
@@ -126,6 +137,7 @@ class AgentRuntime:
         }
         self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
+        state["runtime_metadata"]["session_id"] = public_id
         execution = AgentExecution(
             self.definition.name,
             state,
@@ -134,7 +146,7 @@ class AgentRuntime:
             {"thread_id": thread_id},
             debug=self.debug,
         )
-        self.debug.emit("SESSION", session_id=public_id or "ephemeral")
+        self.debug.emit("SESSION", session_id=public_id)
         self.debug.emit("AGENT START", name=self.definition.name)
         with self.middleware.execution_scope(execution):
             after_called = False
@@ -173,6 +185,7 @@ class AgentRuntime:
         }
         self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
+        state["runtime_metadata"]["session_id"] = public_id
         execution = AgentExecution(
             self.definition.name,
             state,
@@ -181,7 +194,7 @@ class AgentRuntime:
             {"thread_id": thread_id},
             debug=self.debug,
         )
-        self.debug.emit("SESSION", session_id=public_id or "ephemeral")
+        self.debug.emit("SESSION", session_id=public_id)
         self.debug.emit("AGENT START", name=self.definition.name)
         with self.middleware.execution_scope(execution):
             after_called = False
@@ -221,6 +234,7 @@ class AgentRuntime:
         }
         self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
+        state["runtime_metadata"]["session_id"] = public_id
         execution = AgentExecution(
             self.definition.name,
             state,
@@ -231,7 +245,7 @@ class AgentRuntime:
         )
 
         def iterator() -> Iterator[Any]:
-            self.debug.emit("SESSION", session_id=public_id or "ephemeral")
+            self.debug.emit("SESSION", session_id=public_id)
             self.debug.emit("AGENT START", name=self.definition.name)
             with self.middleware.execution_scope(execution):
                 after_called = False
@@ -273,6 +287,7 @@ class AgentRuntime:
         }
         self._load_memory(state, value, memory_id)
         graph_config, thread_id, public_id = self._config(config, session_id)
+        state["runtime_metadata"]["session_id"] = public_id
         execution = AgentExecution(
             self.definition.name,
             state,
@@ -284,7 +299,7 @@ class AgentRuntime:
 
         async def iterator() -> AsyncIterator[Any]:
             result: Any = None
-            self.debug.emit("SESSION", session_id=public_id or "ephemeral")
+            self.debug.emit("SESSION", session_id=public_id)
             self.debug.emit("AGENT START", name=self.definition.name)
             with self.middleware.execution_scope(execution):
                 after_called = False
@@ -382,6 +397,29 @@ class AgentRuntime:
 
     async def ais_paused(self, *, session_id: str) -> bool:
         return bool(await self.apending_interrupts(session_id=session_id))
+
+    def clear_session(self, *, session_id: str) -> None:
+        try:
+            _, thread_id, _ = self._config(None, session_id)
+            result = self.checkpointer.delete_thread(thread_id)
+            if inspect.isawaitable(result):
+                raise TypeError("Checkpointer only supports asynchronous deletion")
+        except Exception as exc:
+            raise PersistenceError(
+                "Unable to clear persistent session", cause=exc
+            ) from exc
+
+    async def aclear_session(self, *, session_id: str) -> None:
+        try:
+            _, thread_id, _ = self._config(None, session_id)
+            try:
+                await self.checkpointer.adelete_thread(thread_id)
+            except NotImplementedError:
+                await asyncio.to_thread(self.checkpointer.delete_thread, thread_id)
+        except Exception as exc:
+            raise PersistenceError(
+                "Unable to clear persistent session asynchronously", cause=exc
+            ) from exc
 
     def completed_approval_count(self, *, session_id: str) -> int:
         """Count approval-gated calls already completed in a child session."""
