@@ -1,5 +1,21 @@
 # Agent Harness
 
+## Merge protection
+
+The CI workflow runs on every pull request and on pushes to the default `master`
+branch. Repository administrators must configure a GitHub ruleset (or branch
+protection rule) for `master`, require pull requests, and require these stable
+status-check names before merging:
+
+- `Ruff`
+- `pytest (Python 3.10)`
+- `pytest (Python 3.11)`
+- `pytest (Python 3.12)`
+
+Branch protection is repository-side configuration and cannot be enforced by a
+workflow committed to this repository. The rule should also prevent bypassing
+these requirements for the roles that merge normal changes.
+
 基于 LangGraph 的轻量 Agent Runtime。Harness 管理 ReAct、会话、Checkpoint、
 Context、Middleware、SubAgent 隔离及渐进式 Skill；应用层只需定义 Agent。
 
