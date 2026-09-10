@@ -329,5 +329,5 @@ ruff check src tests
 pytest -q
 ```
 
-CI 在 Pull Request 上运行 Ruff，并在 Python 3.10、3.11、3.12 执行核心测试。测试默认
+CI 在 Pull Request 上运行 Ruff，并在 Python 3.11、3.12 执行核心测试。测试默认
 使用临时 SQLite Checkpointer/Store，不把内存存储当作运行时持久化实现。
