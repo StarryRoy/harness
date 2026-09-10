@@ -3,6 +3,7 @@
 from .agent import Agent, AgentResult, SubAgentResult
 from .context import AgentContextManager, ContextPolicy
 from .debug import DebugHandler
+from .database import DatabaseAdapter, DatabaseToolkit, SQLiteAdapter, SQLiteConfig
 from .definition import AgentDefinition, RuntimeConfig
 from .enterprise import (
     GuardrailMiddleware,
@@ -86,6 +87,8 @@ __all__ = [
     "ConsoleEventSink",
     "ContextPolicy",
     "DebugHandler",
+    "DatabaseAdapter",
+    "DatabaseToolkit",
     "EventSink",
     "EventType",
     "GuardrailMiddleware",
@@ -112,6 +115,8 @@ __all__ = [
     "RuntimeEvent",
     "RuntimeMetrics",
     "RuntimeObserver",
+    "SQLiteAdapter",
+    "SQLiteConfig",
     "ScriptResult",
     "SessionError",
     "Skill",

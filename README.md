@@ -99,6 +99,40 @@ await agent.aclear_session("session-002")
 的连接生命周期仍由创建它们的应用负责。该入口可供后续 retention policy 调用，本期不包含
 定时清理系统。
 
+## Built-in Database Toolkit
+
+数据库 Toolkit 只封装连接、游标、事务及安全错误结果，不包含表或指标的业务语义。
+SQLite 可直接接收应用管理的连接、数据库路径或 `SQLiteConfig`；默认仅提供只读工具：
+
+```python
+import sqlite3
+
+from agent_harness import DatabaseToolkit, create_agent, require_approval
+
+connection = sqlite3.connect("application.db")
+toolkit = DatabaseToolkit(connection)  # list_tables/get_schema/execute_query
+agent = create_agent(
+    name="data-assistant",
+    instructions="按应用 Skill 中定义的业务语义查询数据。",
+    model=model,
+    tools=toolkit.get_tools(),
+)
+```
+
+写能力必须显式开启。Toolkit 将查询与写工具分离，并给写工具附加敏感操作 metadata；
+应用可用现有 HITL 标记进一步要求审批：
+
+```python
+tools = DatabaseToolkit(connection, include_write=True).get_tools()
+write_tool = next(tool for tool in tools if tool.name == "execute_write")
+require_approval(write_tool, message="批准数据库写操作")
+agent = create_agent(name="writer", instructions="...", model=model, tools=tools)
+```
+
+所有工具返回带 `ok` 的结构化结果。SQL 或数据库错误会转换成稳定、安全且可供 Agent
+修正的错误类型，不向调用方抛出底层 SQLite 异常。`DatabaseAdapter` 是 PostgreSQL 等
+后端的统一扩展接口。应用传入的连接仍由应用管理；Toolkit 只关闭自己从配置创建的连接。
+
 ## SubAgent
 
 ```python
