@@ -2,6 +2,7 @@
 
 from .agent import Agent, AgentResult, SubAgentResult
 from .context import AgentContextManager, ContextPolicy
+from .database import DatabaseBackend, DatabaseToolkit, SQLiteBackend, SQLiteConfig
 from .debug import DebugHandler
 from .definition import AgentDefinition, RuntimeConfig
 from .enterprise import (
@@ -85,6 +86,8 @@ __all__ = [
     "CompositeEventSink",
     "ConsoleEventSink",
     "ContextPolicy",
+    "DatabaseBackend",
+    "DatabaseToolkit",
     "DebugHandler",
     "EventSink",
     "EventType",
@@ -112,6 +115,8 @@ __all__ = [
     "RuntimeEvent",
     "RuntimeMetrics",
     "RuntimeObserver",
+    "SQLiteBackend",
+    "SQLiteConfig",
     "ScriptResult",
     "SessionError",
     "Skill",

@@ -237,6 +237,45 @@ MCP 不使用专属 runtime。安装 `agent-harness[mcp]` 后，调用异步
 `load_mcp_tools(server_config)`，并把得到的标准 `BaseTool` 列表传入 `tools=`，即可
 自动获得现有 Middleware、HITL、Debug 和调用上限能力。
 
+## Built-in Database Toolkit
+
+`DatabaseToolkit` 把数据库访问封装为标准 LangChain `BaseTool`。默认的
+`get_tools()` 只暴露 `list_tables`、`get_schema` 和 `execute_query`；应用层需要显式设置
+`include_write=True` 才会得到独立的 `execute_write` 工具。Toolkit 只处理连接、SQL 执行、
+结果截断、事务边界和稳定错误，不包含表含义、字段语义或业务规则。
+
+```python
+import sqlite3
+
+from agent_harness import DatabaseToolkit, create_agent
+
+connection = sqlite3.connect("business.sqlite")
+database = DatabaseToolkit(
+    connection,
+    max_rows=100,
+    include_write=True,
+    require_write_approval=True,
+)
+
+agent = create_agent(
+    name="data-assistant",
+    instructions="按照应用提供的业务定义查询数据。",
+    model=model,
+    tools=database.get_tools(),
+)
+```
+
+所有操作都返回带 `ok` 的结构化结果；查询还返回 `columns`、`rows`、`row_count`、
+`max_rows` 和 `truncated`。`parameters` 支持位置参数数组或命名参数对象。默认拒绝多语句、
+非 SELECT 查询误用、SELECT 走写入口，以及 `CREATE` / `ALTER` / `DROP` 等危险操作；只有
+显式传入 `allow_dangerous=True` 才启用这三类 DDL。
+
+外部传入的 `sqlite3.Connection` 始终由调用方拥有，Toolkit 不会提交、回滚或关闭它，
+所以可以安全地加入应用已有事务；写结果中的 `committed=False` 会明确这一点。通过
+`SQLiteConfig(...)` 创建的连接由 Toolkit 拥有，每次写操作独立提交，失败时回滚，并可用
+`close()` 或上下文管理器释放。要接入 PostgreSQL 等数据库，实现 `DatabaseBackend` 后通过
+`DatabaseToolkit(backend=...)` 注入即可，Agent 和 Tool 层无需改变。
+
 ## 错误边界
 
 Harness 在应用边界提供稳定的 `AgentError` 子类。Model、Session、Persistence、Memory、HITL、MCP
