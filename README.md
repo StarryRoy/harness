@@ -8,7 +8,6 @@ protection rule) for `master`, require pull requests, and require these stable
 status-check names before merging:
 
 - `Ruff`
-- `pytest (Python 3.10)`
 - `pytest (Python 3.11)`
 - `pytest (Python 3.12)`
 

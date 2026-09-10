@@ -134,10 +134,14 @@ def test_hitl_interrupt_survives_agent_and_sqlite_checkpointer_restart(tmp_path)
         assert calls == ["once"]
         assert not restarted.runtime.is_paused(session_id="durable-hitl")
 
+        checkpoint_config, internal_thread_id, _ = restarted.runtime._config(
+            None, "durable-hitl"
+        )
+        assert restarted_saver.get_tuple(checkpoint_config) is not None
+
         restarted.clear_session("durable-hitl")
-        assert restarted_saver.get_tuple(
-            {"configurable": {"thread_id": "restartable-hitl:durable-hitl"}}
-        ) is None
+        assert restarted_saver.get_tuple(checkpoint_config) is None
+        assert restarted_saver.deleted[-1] == internal_thread_id
     finally:
         restarted_saver.close()
         restarted_store.close()
