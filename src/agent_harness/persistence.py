@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,7 +45,26 @@ def validate_checkpointer(checkpointer: Any) -> Any:
     return checkpointer
 
 
-def validate_store(store: Any) -> Any:
+def _has_semantic_index(store: Any) -> bool:
+    """Return whether a Store advertises configured semantic search.
+
+    Official LangGraph stores expose their normalized ``index`` constructor
+    argument as ``index_config``.  A custom Store can advertise the same
+    capability explicitly with ``supports_semantic_search = True``.
+    """
+    if getattr(store, "supports_semantic_search", False) is True:
+        return True
+    index = getattr(store, "index_config", None)
+    return (
+        isinstance(index, Mapping)
+        and index.get("embed") is not None
+        and not isinstance(index.get("dims"), bool)
+        and isinstance(index.get("dims"), int)
+        and index["dims"] > 0
+    )
+
+
+def validate_store(store: Any, *, require_semantic_search: bool = False) -> Any:
     if store is None:
         raise PersistenceError("A persistent LangGraph Store is required for memory")
     if _inherits_known_memory_type(
@@ -56,6 +76,12 @@ def validate_store(store: Any) -> Any:
     if missing:
         raise PersistenceError(
             "Persistent Store is missing required methods: " + ", ".join(missing)
+        )
+    if require_semantic_search and not _has_semantic_index(store):
+        raise PersistenceError(
+            "Long-term memory requires a persistent LangGraph Store configured "
+            "with a semantic index. Construct the Store with an index containing "
+            "the application's embedding implementation and matching dimensions."
         )
     return store
 

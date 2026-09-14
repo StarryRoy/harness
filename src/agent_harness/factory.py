@@ -151,7 +151,10 @@ def create_agent(
         raise TypeError("memory must be MemoryConfig, True, or None")
     resolved_store = store if store is not None else persistence.store
     if resolved_store is not None:
-        resolved_store = validate_store(resolved_store)
+        resolved_store = validate_store(
+            resolved_store,
+            require_semantic_search=memory_config is not None,
+        )
     if memory_config is not None and resolved_store is None:
         raise PersistenceError("Long-term memory requires a persistent LangGraph Store")
     memory_runtime = (

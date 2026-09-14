@@ -104,6 +104,21 @@ def test_memory_requires_persistent_store_and_rejects_in_memory_store(
             memory=True,
             store=InMemoryStore(),
         )
+    unindexed_store = type(persistent_store)(
+        persistent_store.path + "-unindexed", semantic_search=False
+    )
+    try:
+        with pytest.raises(PersistenceError, match="semantic index"):
+            create_agent(
+                name="unindexed-memory-store",
+                instructions="x",
+                model=model,
+                memory=True,
+                checkpointer=saver,
+                store=unindexed_store,
+            )
+    finally:
+        unindexed_store.close()
     explicit = create_agent(
         name="persistent-memory",
         instructions="x",

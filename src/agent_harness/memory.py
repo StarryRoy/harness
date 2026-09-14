@@ -18,6 +18,14 @@ class MemoryConfig:
     namespace: str = "memory"
     search_limit: int = 6
 
+    def __post_init__(self) -> None:
+        if isinstance(self.search_limit, bool) or not isinstance(
+            self.search_limit, int
+        ):
+            raise TypeError("search_limit must be an integer")
+        if self.search_limit < 1:
+            raise ValueError("search_limit must be at least 1")
+
 
 class LongTermMemory:
     """Thin integration boundary; extraction/update semantics remain in LangMem."""
@@ -57,9 +65,22 @@ class LongTermMemory:
     def load(self, agent: str, memory_id: str, query: str) -> list[dict[str, Any]]:
         try:
             items = self.manager.search(
-                query=query, config=self._runnable_config(agent, memory_id)
+                query=query,
+                limit=self.config.search_limit,
+                config=self._runnable_config(agent, memory_id),
             )
-            return [dict(getattr(item, "value", item)) for item in items]
+            if any(getattr(item, "score", None) is None for item in items):
+                raise MemoryError(
+                    "Long-term memory Store returned unranked results for a semantic "
+                    "query; verify that its embedding index is configured and that "
+                    "existing records have been indexed"
+                )
+            return [
+                dict(getattr(item, "value", item))
+                for item in items[: self.config.search_limit]
+            ]
+        except MemoryError:
+            raise
         except Exception as exc:
             raise MemoryError("Unable to search long-term memory", cause=exc) from exc
 

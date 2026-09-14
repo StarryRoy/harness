@@ -208,20 +208,44 @@ completed：无成功步骤时 Plan 为 failed，已有部分成果时为 partia
 控制指令使用 SystemMessage，不伪造 Assistant 响应。
 
 通过 `memory=True` 启用基于持久化 LangGraph Store 和 LangMem manager 的跨会话记忆。
-启用时必须显式传入 `store=persistent_store`，或配置全局 persistent Store；缺失时在创建
-Agent 阶段抛出 `PersistenceError`。应用调用时提供稳定的 `memory_id`：
+启用时必须显式传入已配置语义索引的 `store=persistent_store`，或配置全局 persistent
+Store；Store 缺失或没有 embedding index 时在创建 Agent 阶段抛出
+`PersistenceError`。应用调用时提供稳定的 `memory_id`：
 
 ```python
-agent = create_agent(..., memory=True, store=persistent_store)
+from agent_harness import MemoryConfig, create_agent
+from langgraph.store.sqlite import SqliteStore
+
+# embedding 由应用选择和初始化；Harness 不绑定模型或厂商。
+persistent_store = SqliteStore(
+    connection,
+    index={
+        "embed": embeddings,
+        "dims": embedding_dimensions,
+        # LangMem 的默认/自定义 schema 都包含在完整 value 中。
+        "fields": ["$"],
+    },
+)
+persistent_store.setup()
+
+agent = create_agent(
+    ...,
+    memory=MemoryConfig(search_limit=6),
+    store=persistent_store,
+)
 agent.invoke("我喜欢简洁报告", session_id="A", memory_id="user-1")
 agent.invoke("按我的偏好写", session_id="B", memory_id="user-1")
 ```
 
-需要语义相似度检索时，应由调用方传入已配置 vector index/embedding 的持久化 LangGraph
-`BaseStore`；Harness
-不会选择或硬编码 embedding provider。Main 委派时会把稳定的 `memory_id` 传给已启用
-Memory 的 SubAgent；长期记忆仍按 `(namespace, agent_name, memory_id)` 隔离，因此
-SubAgent A/B 和 Main 不会读取彼此的记忆。
+`MemoryConfig.search_limit` 同时限制响应前加载到上下文的相关记忆数，以及 LangMem 在提取、
+去重、合并和更新前读取的候选记忆数。Harness 把当前问题作为原生 Store
+`search(query=..., limit=...)` 的语义查询，不实现自己的向量库或相似度算法。已有的未索引
+记录需要由应用在上线语义索引时重新写入/回填，才能参与向量检索。
+
+Main 委派时会把稳定的 `memory_id` 传给已启用 Memory 的 SubAgent；长期记忆仍按
+`(namespace, agent_name, memory_id)` 隔离，因此 SubAgent A/B 和 Main 不会读取彼此的
+记忆。自定义持久化 Store 应遵守 LangGraph 语义搜索约定（查询结果带 `score`），并可用
+`supports_semantic_search = True` 显式声明能力。
 
 用 `require_approval(tool)` 标记敏感工具。图会通过 LangGraph `interrupt()` 暂停，
 随后调用 `agent.resume(session_id="...", decision="approve")`；也支持 `reject`，或

@@ -10,6 +10,20 @@ from langgraph.store.sqlite import SqliteStore
 from agent_harness import configure_default_persistence
 
 
+def deterministic_embeddings(texts):
+    """Small deterministic embedding used only by the persistence tests."""
+    concept_terms = (
+        ("concise", "report", "answer"),
+        ("pizza", "hungry", "food"),
+        ("python", "code", "programming"),
+        ("tea", "drink", "preference"),
+    )
+    return [
+        [float(sum(text.lower().count(term) for term in terms)) for terms in concept_terms]
+        for text in texts
+    ]
+
+
 class PersistentSaverStub(BaseCheckpointSaver):
     """Sync/async adapter over a real temporary SQLite checkpoint database."""
 
@@ -61,10 +75,16 @@ class PersistentSaverStub(BaseCheckpointSaver):
 
 
 class PersistentStoreStub(BaseStore):
-    def __init__(self, path):
+    def __init__(self, path, *, semantic_search=True):
         self.path = str(path)
         self.connection = sqlite3.connect(path, check_same_thread=False)
-        self.backend = SqliteStore(self.connection)
+        index = (
+            {"dims": 4, "embed": deterministic_embeddings, "fields": ["$"]}
+            if semantic_search
+            else None
+        )
+        self.backend = SqliteStore(self.connection, index=index)
+        self.index_config = self.backend.index_config
         self.backend.setup()
         self.connection.commit()
 
