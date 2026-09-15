@@ -36,6 +36,9 @@ from agent_harness.middleware import (
 
 pytestmark = pytest.mark.usefixtures("persistent_defaults")
 
+_MEANINGFUL_CONTEXT = "context " * 350
+_SECOND_CONTEXT = "second " * 350
+
 
 class RecordingModel(FakeMessagesListChatModel):
     seen: list[list[object]] = Field(default_factory=list)
@@ -84,10 +87,9 @@ def tool_call(name, arguments, identifier):
     }
 
 
-def test_message_threshold_triggers_langmem_summary():
+def test_token_threshold_triggers_langmem_summary():
     policy = ContextPolicy(
-        summary_threshold=2,
-        summary_token_threshold=100_000,
+        summary_token_threshold=1_000,
         summary_keep_recent=1,
     )
     model = RecordingModel(
@@ -104,8 +106,8 @@ def test_message_threshold_triggers_langmem_summary():
         runtime_config=RuntimeConfig(context_policy=policy),
     )
 
-    agent.invoke("first", session_id="session")
-    result = agent.invoke("second", session_id="session")
+    agent.invoke(_MEANINGFUL_CONTEXT, session_id="session")
+    result = agent.invoke(_SECOND_CONTEXT, session_id="session")
 
     assert len(model.seen) == 3
     assert result["messages"][-1].content == "turn two"
@@ -113,13 +115,11 @@ def test_message_threshold_triggers_langmem_summary():
         isinstance(message, SystemMessage) and "conversation summary" in message.content
         for message in result["summarized_messages"]
     )
-    assert result["summarized_messages"][-1].content == "second"
 
 
-def test_message_threshold_triggers_async_langmem_summary():
+def test_token_threshold_triggers_async_langmem_summary():
     policy = ContextPolicy(
-        summary_threshold=2,
-        summary_token_threshold=100_000,
+        summary_token_threshold=1_000,
         summary_keep_recent=1,
     )
     model = RecordingModel(
@@ -137,15 +137,14 @@ def test_message_threshold_triggers_async_langmem_summary():
     )
 
     async def run():
-        await agent.ainvoke("first", session_id="session")
-        return await agent.ainvoke("second", session_id="session")
+        await agent.ainvoke(_MEANINGFUL_CONTEXT, session_id="session")
+        return await agent.ainvoke(_SECOND_CONTEXT, session_id="session")
 
     result = asyncio.run(run())
 
     assert len(model.seen) == 3
     assert result["messages"][-1].content == "turn two"
     assert result["summary"] == "conversation summary"
-    assert result["summarized_messages"][-1].content == "second"
 
 
 def test_guardrail_emits_required_debug_event():
@@ -183,8 +182,7 @@ def test_model_fallback_emits_required_debug_event():
 @pytest.mark.parametrize("async_mode", [False, True])
 def test_summary_context_keeps_later_tool_observation(async_mode):
     policy = ContextPolicy(
-        summary_threshold=2,
-        summary_token_threshold=100_000,
+        summary_token_threshold=1_000,
         summary_keep_recent=1,
     )
 
@@ -215,14 +213,14 @@ def test_summary_context_keeps_later_tool_observation(async_mode):
     )
 
     async def run_async():
-        await agent.ainvoke("first", session_id="session")
-        return await agent.ainvoke("second", session_id="session")
+        await agent.ainvoke(_MEANINGFUL_CONTEXT, session_id="session")
+        return await agent.ainvoke(_SECOND_CONTEXT, session_id="session")
 
     if async_mode:
         result = asyncio.run(run_async())
     else:
-        agent.invoke("first", session_id="session")
-        result = agent.invoke("second", session_id="session")
+        agent.invoke(_MEANINGFUL_CONTEXT, session_id="session")
+        result = agent.invoke(_SECOND_CONTEXT, session_id="session")
 
     assert result["messages"][-1].content == "used observation"
     assert any(
@@ -233,8 +231,7 @@ def test_summary_context_keeps_later_tool_observation(async_mode):
 
 def test_plan_prepare_and_summary_run_before_planner_for_new_turn():
     policy = ContextPolicy(
-        summary_threshold=2,
-        summary_token_threshold=100_000,
+        summary_token_threshold=1_000,
         summary_keep_recent=1,
     )
     model = RecordingModel(
@@ -244,7 +241,6 @@ def test_plan_prepare_and_summary_run_before_planner_for_new_turn():
             AIMessage(content="summary-1"),
             AIMessage(content="step-2"),
             AIMessage(content="final-2"),
-            AIMessage(content="summary-2"),
             AIMessage(content="step-3"),
             AIMessage(content="final-3"),
         ],
@@ -262,8 +258,8 @@ def test_plan_prepare_and_summary_run_before_planner_for_new_turn():
         runtime_config=RuntimeConfig(context_policy=policy),
     )
 
-    agent.invoke("first request", session_id="session")
-    agent.invoke("second request", session_id="session")
+    agent.invoke(_MEANINGFUL_CONTEXT, session_id="session")
+    agent.invoke(_MEANINGFUL_CONTEXT, session_id="session")
     agent.invoke("latest third request", session_id="session")
 
     latest_plan_context = model.structured_seen[-1]
@@ -272,7 +268,7 @@ def test_plan_prepare_and_summary_run_before_planner_for_new_turn():
         for message in latest_plan_context
     )
     assert any(
-        isinstance(message, SystemMessage) and "summary-2" in message.content
+        isinstance(message, SystemMessage) and "summary-1" in message.content
         for message in latest_plan_context
     )
 

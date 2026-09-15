@@ -155,13 +155,21 @@ config = RuntimeConfig(
     timeout_seconds=60,
     call_limit=48,
     context_policy=ContextPolicy(
-        summary_threshold=40,
-        summary_token_threshold=6000,
         summary_keep_recent=12,
         skill_retention_turns=2,
+        summary_context_fraction=0.60,
     ),
 )
 ```
+
+默认摘要 token 阈值会优先读取当前 LangChain 模型 profile 中的
+`max_input_tokens`，并取 context window 的 60%，为 System Prompt、Skill、长期记忆、
+Tool Result 和后续模型输出保留约 40% 空间。自定义模型没有提供可靠的
+`profile["max_input_tokens"]` 时，必须显式配置
+`ContextPolicy(model_max_input_tokens=<模型最大输入 token>)`。仍可通过
+`summary_token_threshold=<整数>` 显式覆盖最终摘要阈值，但模型最大输入 token 仍须可用。
+
+摘要只按完整 prompt 的估算 token 数触发，不再使用消息数量作为触发条件。
 
 ## 业务 State 与 Runtime Context
 

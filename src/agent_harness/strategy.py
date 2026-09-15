@@ -194,7 +194,7 @@ class _ExecutionStrategySupport:
                 "Short-term summarization requires the 'langmem' package", cause=exc
             ) from exc
 
-        summary_max_tokens = context.policy.summary_token_threshold + max(
+        summary_max_tokens = context.summary_token_threshold + max(
             context.policy.summary_keep_recent * 256, 512
         )
         summary_max_summary_tokens = max(context.policy.summary_keep_recent * 64, 128)
@@ -205,29 +205,7 @@ class _ExecutionStrategySupport:
             messages = list(state.get("messages", []))
             summary_context = dict(state.get("context", {}))
             running_summary = summary_context.get("running_summary")
-            unsummarized_start = 0
-            last_summarized_id = getattr(
-                running_summary, "last_summarized_message_id", None
-            )
-            if last_summarized_id is not None:
-                for index, message in enumerate(messages):
-                    if message.id == last_summarized_id:
-                        unsummarized_start = index + 1
-                        break
-            unsummarized = messages[unsummarized_start:]
-            threshold = context.policy.summary_token_threshold
-            if (
-                count_tokens_approximately(unsummarized) < threshold
-                and len(unsummarized) >= context.policy.summary_threshold
-            ):
-                old_messages = unsummarized[: -context.policy.summary_keep_recent]
-                threshold = max(
-                    1,
-                    sum(
-                        count_tokens_approximately([message])
-                        for message in old_messages
-                    ),
-                )
+            threshold = context.summary_history_token_threshold(state)
             return messages, summary_context, running_summary, threshold
 
         def summary_update(

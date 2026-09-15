@@ -2,12 +2,25 @@ import asyncio
 import sqlite3
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.store.base import BaseStore
 from langgraph.store.sqlite import SqliteStore
 
 from agent_harness import configure_default_persistence
+
+
+@pytest.fixture(autouse=True)
+def fake_model_context_profile(monkeypatch):
+    """Give LangChain's provider-less fake model realistic context metadata."""
+    original_init = FakeMessagesListChatModel.__init__
+
+    def init_with_profile(self, *args, **kwargs):
+        kwargs.setdefault("profile", {"max_input_tokens": 128_000})
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(FakeMessagesListChatModel, "__init__", init_with_profile)
 
 
 def deterministic_embeddings(texts):

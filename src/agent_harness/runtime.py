@@ -77,7 +77,10 @@ class AgentRuntime:
         self.debug = self.observer
         self.skills = skills
         self.context = AgentContextManager(
-            definition.instructions, skills, definition.runtime_config.context_policy
+            definition.instructions,
+            skills,
+            definition.runtime_config.context_policy,
+            model=definition.model,
         )
         self.middleware = MiddlewarePipeline(definition.middleware, self.debug)
         self.memory = memory

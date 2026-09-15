@@ -11,30 +11,59 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 from .skills import SkillRegistry
 
+_DEFAULT_SUMMARY_CONTEXT_FRACTION = 0.60
+
 
 @dataclass(frozen=True, slots=True)
 class ContextPolicy:
-    summary_threshold: int = 40
-    summary_token_threshold: int = 6_000
+    summary_token_threshold: int | None = None
     summary_keep_recent: int = 12
     max_tool_results: int = 8
     max_tool_result_chars: int = 8_000
     max_skill_candidates: int = 8
     skill_retention_turns: int = 2
+    summary_context_fraction: float = _DEFAULT_SUMMARY_CONTEXT_FRACTION
+    model_max_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        if self.summary_threshold < 2:
-            raise ValueError("summary_threshold must be at least 2")
-        if self.summary_token_threshold < 256:
+        if (
+            self.summary_token_threshold is not None
+            and self.summary_token_threshold < 256
+        ):
             raise ValueError("summary_token_threshold must be at least 256")
-        if not 1 <= self.summary_keep_recent < self.summary_threshold:
-            raise ValueError(
-                "summary_keep_recent must be between 1 and summary_threshold - 1"
-            )
+        if self.summary_keep_recent < 1:
+            raise ValueError("summary_keep_recent must be at least 1")
         if self.max_tool_results < 0 or self.max_tool_result_chars < 1:
             raise ValueError("tool context limits are invalid")
         if self.max_skill_candidates < 1 or self.skill_retention_turns < 0:
             raise ValueError("skill context limits are invalid")
+        if not 0 < self.summary_context_fraction < 1:
+            raise ValueError("summary_context_fraction must be between 0 and 1")
+        if (
+            self.model_max_input_tokens is not None
+            and self.model_max_input_tokens < 256
+        ):
+            raise ValueError("model_max_input_tokens must be at least 256")
+
+    def resolve_summary_token_threshold(self, model: Any | None = None) -> int:
+        """Resolve an explicit threshold or derive one from model metadata."""
+        profile = getattr(model, "profile", None)
+        profiled_context_window = (
+            profile.get("max_input_tokens") if isinstance(profile, Mapping) else None
+        )
+        context_window = self.model_max_input_tokens or profiled_context_window
+        if (
+            not isinstance(context_window, int)
+            or isinstance(context_window, bool)
+            or context_window < 256
+        ):
+            raise ValueError(
+                "The model profile does not provide a valid max_input_tokens; "
+                "set ContextPolicy(model_max_input_tokens=...) explicitly"
+            )
+        if self.summary_token_threshold is not None:
+            return self.summary_token_threshold
+        return max(256, int(context_window * self.summary_context_fraction))
 
 
 class AgentContextManager:
@@ -43,10 +72,13 @@ class AgentContextManager:
         instructions: str,
         skills: SkillRegistry,
         policy: ContextPolicy,
+        *,
+        model: Any | None = None,
     ) -> None:
         self.instructions = instructions
         self.skills = skills
         self.policy = policy
+        self.summary_token_threshold = policy.resolve_summary_token_threshold(model)
 
     def discover(self, value: str | Mapping[str, Any]) -> list[dict[str, str]]:
         if isinstance(value, str):
@@ -191,9 +223,29 @@ class AgentContextManager:
         return bounded
 
     def needs_summary(self, state: Mapping[str, Any]) -> bool:
-        messages = list(state.get("messages", []))
+        _, _, prompt_tokens = self._context_token_counts(state)
+        return prompt_tokens >= self.summary_token_threshold
+
+    def summary_history_token_threshold(self, state: Mapping[str, Any]) -> int:
+        """Return the history budget after fixed prompt context is accounted for."""
+        _, history_tokens, prompt_tokens = self._context_token_counts(state)
+        fixed_prompt_tokens = max(0, prompt_tokens - history_tokens)
+        return max(1, self.summary_token_threshold - fixed_prompt_tokens)
+
+    def _context_token_counts(
+        self, state: Mapping[str, Any]
+    ) -> tuple[list[Any], int, int]:
+        runtime_metadata = state.get("runtime_metadata", {})
+        business_context = (
+            runtime_metadata.get("business_context")
+            if isinstance(runtime_metadata, Mapping)
+            and isinstance(runtime_metadata.get("business_context"), Mapping)
+            else None
+        )
+        prompt = self.build_messages(state, business_context)
+        messages = prompt[1:]
         return (
-            len(messages) >= self.policy.summary_threshold
-            or count_tokens_approximately(messages)
-            >= self.policy.summary_token_threshold
+            messages,
+            count_tokens_approximately(messages),
+            count_tokens_approximately(prompt),
         )
