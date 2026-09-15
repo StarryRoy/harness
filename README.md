@@ -269,6 +269,38 @@ MCP 不使用专属 runtime。安装 `agent-harness[mcp]` 后，调用异步
 `load_mcp_tools(server_config)`，并把得到的标准 `BaseTool` 列表传入 `tools=`，即可
 自动获得现有 Middleware、HITL、Debug 和调用上限能力。
 
+## Built-in RAG Retriever
+
+`RAGRetriever` 对已经初始化好的 Vector Retriever 和 BM25 Retriever 做统一召回、
+合并去重和重排。Harness 不负责文档解析、切分、Embedding、分词或索引管理；这些逻辑
+完全由传入的 Retriever 保持，并分别通过其 `invoke(query)` / `retrieve(query)` 执行；
+异步实现可提供 `ainvoke(query)` / `aretrieve(query)`，只有同步接口时会在线程中调用。
+
+```python
+from agent_harness import RAGRetriever, create_agent
+
+rag = RAGRetriever(
+    vector_retriever=vector_retriever,
+    bm25_retriever=bm25_retriever,
+    reranker=reranker,
+)
+
+references = rag.invoke("退款政策是什么？")
+async_references = await rag.ainvoke("退款政策是什么？")
+
+# RAGRetriever 本身也是标准 BaseTool，可直接交给 Agent。
+agent = create_agent(..., tools=[rag])
+```
+
+Reranker 可实现 `rerank(query, documents)`、`rank(query, documents)`，或者标准 Runnable
+形式的 `invoke({"query": query, "documents": documents})`；异步版本分别为 `arerank`、
+`arank`、`ainvoke`。传入 Reranker 的 `documents` 已统一为包含 `content`、`score`、
+`source`、`metadata` 的字典列表。重排器可以返回排序后的文档、候选下标及分数，或与候选
+等长的分数列表。
+
+结果中的 `metadata` 会保留原始 `page`、`chunk_id`、`document_id`、`title`、`url` 等
+字段，并通过 `retrieval_channels` 标识候选来自 vector、BM25 或两者。
+
 ## Built-in Database Toolkit
 
 `DatabaseToolkit` 把数据库访问封装为标准 LangChain `BaseTool`。默认的

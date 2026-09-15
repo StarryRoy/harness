@@ -55,6 +55,7 @@ from .observability import (
     sanitize_payload,
 )
 from .persistence import PersistenceConfig, configure_default_persistence
+from .rag import RAGResult, RAGRetriever
 from .skills import (
     LexicalSkillSelector,
     ScriptResult,
@@ -109,6 +110,8 @@ __all__ = [
     "PersistenceConfig",
     "PersistenceError",
     "PlanExecuteStrategy",
+    "RAGResult",
+    "RAGRetriever",
     "ReActStrategy",
     "RetryMiddleware",
     "RuntimeConfig",
