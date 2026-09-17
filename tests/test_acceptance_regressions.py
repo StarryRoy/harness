@@ -43,10 +43,19 @@ _SECOND_CONTEXT = "second " * 350
 class RecordingModel(FakeMessagesListChatModel):
     seen: list[list[object]] = Field(default_factory=list)
     structured_seen: list[list[object]] = Field(default_factory=list)
+    bound_tool_names: list[str] = Field(default_factory=list)
+    tool_choices: list[object] = Field(default_factory=list)
     structured_outputs: list[object] = Field(default_factory=list)
     structured_index: int = 0
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        self.bound_tool_names = [
+            tool.get("function", {}).get("name", "")
+            if isinstance(tool, dict)
+            else tool.name
+            for tool in tools
+        ]
+        self.tool_choices.append(tool_choice)
         return self
 
     def with_structured_output(self, schema, **kwargs):
@@ -538,16 +547,24 @@ def test_plan_execute_with_structured_output_runs_full_graph():
     assert len(model.structured_seen) == 2
 
 
-def test_react_structured_output_is_the_final_model_call_after_tools():
+def test_react_structured_output_preserves_multiple_tool_rounds():
     expected = {"answer": "structured tool result"}
+    response_tool = "agent_harness_structured_response"
     model = RecordingModel(
         responses=[
             AIMessage(
                 content="",
                 tool_calls=[tool_call("lookup", {"value": "x"}, "lookup-1")],
-            )
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[tool_call("lookup", {"value": "y"}, "lookup-2")],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[tool_call(response_tool, expected, "response-1")],
+            ),
         ],
-        structured_outputs=[expected],
     )
 
     def lookup(value: str) -> str:
@@ -565,12 +582,84 @@ def test_react_structured_output_is_the_final_model_call_after_tools():
     result = agent.invoke("look it up")
 
     assert result["structured_response"] == expected
-    assert len(model.seen) == 1
-    assert len(model.structured_seen) == 1
+    assert len(model.seen) == 3
+    assert model.structured_seen == []
+    assert model.bound_tool_names == ["lookup", response_tool]
+    assert model.tool_choices == ["any"]
     assert any(
         isinstance(message, ToolMessage) and message.content == "found:x"
-        for message in model.structured_seen[0]
+        for message in model.seen[1]
     )
+    assert any(
+        isinstance(message, ToolMessage) and message.content == "found:y"
+        for message in model.seen[2]
+    )
+
+
+def test_react_can_return_structured_output_on_first_call_with_tools():
+    expected = {"answer": "no tool needed"}
+    response_tool = "agent_harness_structured_response"
+    model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[tool_call(response_tool, expected, "response-1")],
+            )
+        ]
+    )
+
+    def lookup(value: str) -> str:
+        """Look up a value."""
+        return f"found:{value}"
+
+    agent = create_agent(
+        name="react-structured-direct",
+        instructions="Return structured output directly when no tool is needed.",
+        model=model,
+        tools=[StructuredTool.from_function(lookup)],
+        response_format=dict,
+    )
+
+    result = agent.invoke("answer directly")
+
+    assert result["structured_response"] == expected
+    assert len(model.seen) == 1
+    assert model.structured_seen == []
+
+
+def test_async_react_structured_output_uses_terminal_tool():
+    expected = {"answer": "async structured result"}
+    response_tool = "agent_harness_structured_response"
+    model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[tool_call("lookup", {"value": "async"}, "lookup-1")],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[tool_call(response_tool, expected, "response-1")],
+            ),
+        ]
+    )
+
+    def lookup(value: str) -> str:
+        """Look up a value."""
+        return f"found:{value}"
+
+    agent = create_agent(
+        name="async-react-structured-tool",
+        instructions="Use tools and return structured output.",
+        model=model,
+        tools=[StructuredTool.from_function(lookup)],
+        response_format=dict,
+    )
+
+    result = asyncio.run(agent.ainvoke("look it up asynchronously"))
+
+    assert result["structured_response"] == expected
+    assert len(model.seen) == 2
+    assert model.structured_seen == []
 
 
 class NamespaceMemory:

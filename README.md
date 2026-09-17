@@ -54,8 +54,10 @@ print(result.output)
 `output`、`status`、`session_id`、`structured_output` 和 `interrupts`；需要诊断或
 高级编排时才读取完整的 `result.state`。状态为 `completed`、`paused` 或 `error`。
 启用 Structured Output 时，格式化结果同时作为 `output` 和 `structured_output` 返回。
-最终响应由执行节点直接通过 `model.with_structured_output(response_format)` 生成；ReAct
-工具批次结束后以及 PlanExecute 进入综合阶段后都不会再追加独立的格式化模型调用。
+无工具 ReAct 与 PlanExecute 的明确最终阶段直接使用
+`model.with_structured_output(response_format)`。带工具 ReAct 会把响应 Schema 作为终止型
+结构化工具与业务工具一同绑定：模型可以继续多轮调用业务工具，也可以在同一次调用中提交
+最终结构化响应，不再追加独立的格式化模型调用。
 
 所有执行都使用公开 `session_id`。调用时未传 ID，Harness 会生成 `session-...` 并通过
 `AgentResult.session_id` 返回；HITL 暂停后可以直接用该 ID 恢复，不存在应用层无法取得的

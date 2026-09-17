@@ -10,6 +10,8 @@ from typing import Any, Literal, TypedDict
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_core.utils.pydantic import is_basemodel_subclass
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -72,18 +74,47 @@ class _ExecutionStrategySupport:
             )
         all_tools: list[BaseTool] = [*definition.tools, *internal_tools]
         executable = {tool.name: tool for tool in all_tools}
+        response_tool = (
+            self._structured_response_tool(definition.response_format)
+            if definition.response_format is not None and all_tools and not planning
+            else None
+        )
+        if response_tool is not None and response_tool["function"]["name"] in executable:
+            raise ValueError(
+                f"Tool name '{response_tool['function']['name']}' is reserved by the Harness"
+            )
+        agent_tools: list[Any] = [
+            *all_tools,
+            *([response_tool] if response_tool is not None else []),
+        ]
         model = (
-            definition.model.bind_tools(all_tools) if all_tools else definition.model
+            definition.model.bind_tools(
+                agent_tools,
+                **({"tool_choice": "auto"} if response_tool is not None else {}),
+            )
+            if agent_tools
+            else definition.model
         )
         structured_model = (
             definition.model.with_structured_output(definition.response_format)
-            if definition.response_format is not None
+            if definition.response_format is not None and response_tool is None
             else None
         )
 
         def prompt(state: Mapping[str, Any]) -> list[Any]:
             execution = middleware.current_execution()
             messages = context.build_messages(state, execution.business_context)
+            if response_tool is not None:
+                messages.insert(
+                    1,
+                    SystemMessage(
+                        content=(
+                            "Continue using tools for as many rounds as needed. When the task is "
+                            f"complete, call {response_tool['function']['name']} exactly once with "
+                            "the final structured response. Do not return the final answer as text."
+                        )
+                    ),
+                )
             if planning and state.get("plan"):
                 plan = state["plan"]
                 current = int(plan.get("current_step", 0))
@@ -121,6 +152,8 @@ class _ExecutionStrategySupport:
             messages: list[Any],
             purpose: str,
             response_format: Any | None = None,
+            tools: tuple[Any, ...] = (),
+            tool_choice: Any | None = None,
         ) -> Any:
             request = ModelRequest(
                 middleware.current_execution(),
@@ -128,12 +161,9 @@ class _ExecutionStrategySupport:
                 messages,
                 config,
                 purpose=purpose,
-                tools=(
-                    tuple(all_tools)
-                    if purpose == "agent" and response_format is None
-                    else ()
-                ),
+                tools=tools,
                 response_format=response_format,
+                tool_choice=tool_choice,
             )
             try:
                 return middleware.model(
@@ -151,6 +181,8 @@ class _ExecutionStrategySupport:
             messages: list[Any],
             purpose: str,
             response_format: Any | None = None,
+            tools: tuple[Any, ...] = (),
+            tool_choice: Any | None = None,
         ) -> Any:
             request = ModelRequest(
                 middleware.current_execution(),
@@ -158,12 +190,9 @@ class _ExecutionStrategySupport:
                 messages,
                 config,
                 purpose=purpose,
-                tools=(
-                    tuple(all_tools)
-                    if purpose == "agent" and response_format is None
-                    else ()
-                ),
+                tools=tools,
                 response_format=response_format,
+                tool_choice=tool_choice,
             )
             try:
                 return await middleware.amodel(
@@ -186,12 +215,24 @@ class _ExecutionStrategySupport:
                     "partial",
                     "failed",
                 }
-            if not all_tools:
-                return True
-            message = state.get("messages", [None])[-1]
-            return isinstance(message, ToolMessage) or (
-                isinstance(message, AIMessage) and not message.tool_calls
-            )
+            return not all_tools
+
+        def model_update(response: Any, iteration: int) -> dict[str, Any]:
+            if response_tool is not None:
+                parsed = self._parse_structured_response_tool(
+                    response, response_tool, definition.response_format
+                )
+                if parsed is not None:
+                    return {
+                        "structured_response": parsed,
+                        "structured_output_complete": True,
+                        "iteration": iteration,
+                    }
+                if not isinstance(response, AIMessage) or not response.tool_calls:
+                    raise ModelError(
+                        "ReAct model must call a business tool or the structured response tool"
+                    )
+            return {"messages": [response], "iteration": iteration}
 
         def model_node(
             state: Mapping[str, Any], config: RunnableConfig
@@ -205,6 +246,8 @@ class _ExecutionStrategySupport:
                 prompt(state),
                 "agent",
                 definition.response_format if structured else None,
+                tuple(agent_tools) if not structured else (),
+                "auto" if response_tool is not None and not structured else None,
             )
             if structured:
                 return {
@@ -212,7 +255,7 @@ class _ExecutionStrategySupport:
                     "structured_output_complete": True,
                     "iteration": iteration,
                 }
-            return {"messages": [response], "iteration": iteration}
+            return model_update(response, iteration)
 
         async def async_model_node(
             state: Mapping[str, Any], config: RunnableConfig
@@ -226,6 +269,8 @@ class _ExecutionStrategySupport:
                 prompt(state),
                 "agent",
                 definition.response_format if structured else None,
+                tuple(agent_tools) if not structured else (),
+                "auto" if response_tool is not None and not structured else None,
             )
             if structured:
                 return {
@@ -233,7 +278,7 @@ class _ExecutionStrategySupport:
                     "structured_output_complete": True,
                     "iteration": iteration,
                 }
-            return {"messages": [response], "iteration": iteration}
+            return model_update(response, iteration)
 
         try:
             from langchain_core.messages.utils import count_tokens_approximately
@@ -320,7 +365,7 @@ class _ExecutionStrategySupport:
         def route(
             state: Mapping[str, Any],
         ) -> Literal[
-            "tools", "replan", "advance", "fail", "finalize", "model", "done"
+            "tools", "replan", "advance", "fail", "finalize", "done"
         ]:
             if state.get("structured_output_complete"):
                 return "finalize" if planning else "done"
@@ -354,7 +399,7 @@ class _ExecutionStrategySupport:
                 return "advance"
             if planning:
                 return "finalize"
-            return "model" if definition.response_format is not None else "done"
+            return "done"
 
         def advance_node(state: Mapping[str, Any]) -> dict[str, Any]:
             plan = dict(state["plan"])
@@ -591,7 +636,6 @@ class _ExecutionStrategySupport:
             graph.add_edge("summarize", "model")
         destinations: dict[str, Any] = {
             "tools": "tools",
-            "model": "model",
             "done": END,
         }
         if planning:
@@ -610,6 +654,67 @@ class _ExecutionStrategySupport:
         if planning:
             graph.add_edge("finalize", END)
         return graph.compile(checkpointer=checkpointer)
+
+    @staticmethod
+    def _structured_response_tool(response_format: Any) -> dict[str, Any]:
+        name = "agent_harness_structured_response"
+        if response_format is dict:
+            parameters: dict[str, Any] = {
+                "type": "object",
+                "additionalProperties": True,
+            }
+        elif isinstance(response_format, dict) and response_format.get("type") == "function":
+            parameters = dict(response_format.get("function", {}).get("parameters", {}))
+        elif isinstance(response_format, dict) and "function" in response_format:
+            parameters = dict(response_format["function"].get("parameters", {}))
+        elif isinstance(response_format, dict):
+            parameters = dict(response_format)
+            parameters.pop("title", None)
+        else:
+            converted = convert_to_openai_tool(response_format)
+            parameters = dict(converted["function"]["parameters"])
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "Submit the final response matching the required schema.",
+                "parameters": parameters,
+            },
+        }
+
+    @staticmethod
+    def _parse_structured_response_tool(
+        response: Any,
+        response_tool: Mapping[str, Any],
+        response_format: Any,
+    ) -> Any | None:
+        if not isinstance(response, AIMessage):
+            return None
+        name = response_tool["function"]["name"]
+        matches = [call for call in response.tool_calls if call.get("name") == name]
+        if not matches:
+            return None
+        if len(matches) != 1 or len(response.tool_calls) != 1:
+            raise ModelError(
+                "Structured response tool must be the only tool call in the final response"
+            )
+        arguments = matches[0].get("args", {})
+        if not isinstance(arguments, Mapping):
+            raise ModelError("Structured response tool arguments must be an object")
+        value = dict(arguments)
+        if isinstance(response_format, type) and is_basemodel_subclass(response_format):
+            try:
+                validator = getattr(response_format, "model_validate", None)
+                return (
+                    validator(value)
+                    if callable(validator)
+                    else response_format.parse_obj(value)
+                )
+            except Exception as exc:
+                raise ModelError(
+                    "Structured response validation failed", cause=exc
+                ) from exc
+        return value
 
     @staticmethod
     def _skill_tools(

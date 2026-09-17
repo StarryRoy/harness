@@ -35,6 +35,7 @@ class ModelRequest:
     purpose: str = "agent"
     tools: tuple[Any, ...] = ()
     response_format: Any | None = None
+    tool_choice: Any | None = None
     model_override: Any | None = None
 
     def with_model(self, model: Any) -> ModelRequest:
@@ -46,7 +47,12 @@ class ModelRequest:
         if self.response_format is not None:
             return model.with_structured_output(self.response_format)
         if self.tools:
-            return model.bind_tools(list(self.tools))
+            kwargs = (
+                {"tool_choice": self.tool_choice}
+                if self.tool_choice is not None
+                else {}
+            )
+            return model.bind_tools(list(self.tools), **kwargs)
         return model
 
     def invoke_with(self, model: Any) -> Any:

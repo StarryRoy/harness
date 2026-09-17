@@ -31,14 +31,16 @@ class Runnable:
 
 
 class FallbackModel(Runnable):
-    def bind_tools(self, tools):
+    def bind_tools(self, tools, *, tool_choice=None):
+        if tool_choice is not None:
+            self.events.append(("tool-choice", tool_choice))
         return Runnable(self.events, "fallback-tools")
 
     def with_structured_output(self, schema):
         return Runnable(self.events, "fallback-structured")
 
 
-def request(*, tools=(), response_format=None, purpose="agent"):
+def request(*, tools=(), response_format=None, purpose="agent", tool_choice=None):
     return ModelRequest(
         execution=AgentExecution("assistant", {}),
         state={},
@@ -47,6 +49,7 @@ def request(*, tools=(), response_format=None, purpose="agent"):
         purpose=purpose,
         tools=tools,
         response_format=response_format,
+        tool_choice=tool_choice,
     )
 
 
@@ -90,3 +93,13 @@ def test_async_primary_retries_before_fallback():
 
     assert asyncio.run(pipeline.amodel(request(), primary)) == "fallback"
     assert events == ["primary", "primary", "fallback"]
+
+
+def test_fallback_preserves_required_tool_choice():
+    events = []
+    fallback = FallbackModel(events, "fallback")
+
+    result = request(tools=(object(),), tool_choice="any").invoke_with(fallback)
+
+    assert result == "fallback-tools"
+    assert events == [("tool-choice", "any"), "fallback-tools"]
