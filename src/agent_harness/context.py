@@ -11,7 +11,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 from .skills import SkillRegistry
 
-_DEFAULT_SUMMARY_CONTEXT_FRACTION = 0.60
+_DEFAULT_SUMMARY_CONTEXT_FRACTION = 0.80
 
 
 @dataclass(frozen=True, slots=True)

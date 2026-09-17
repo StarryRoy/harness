@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-harness"
+name = "sense-harness"
 version = "0.1.0"
 description = "A small LangGraph-based agent harness with progressive skills"
 requires-python = ">=3.11"
