@@ -43,6 +43,9 @@ from .state import HARNESS_STATE_FIELDS
 from .strategy import AgentStrategy
 
 
+_MEMORY_MESSAGE_START = "_memory_message_start"
+
+
 def _derive_child_session_id(
     parent_thread_id: str, subagent_name: str, tool_call_id: str
 ) -> str:
@@ -221,6 +224,10 @@ class AgentRuntime:
         )
         return merged, thread_id, public_id
 
+    @staticmethod
+    def _message_count(snapshot: Any) -> int:
+        return len(snapshot.values.get("messages", []))
+
     def invoke(
         self,
         value: str | dict[str, Any],
@@ -240,6 +247,9 @@ class AgentRuntime:
             "trace_id": trace_id,
             "agent_span_id": agent_span_id,
             "parent_span_id": parent_span_id,
+            _MEMORY_MESSAGE_START: self._message_count(
+                self.graph.get_state(graph_config)
+            ),
         }
         with self.observer.trace(
             agent_name=self.definition.name,
@@ -277,7 +287,11 @@ class AgentRuntime:
                     completed = self._completed(graph_config)
                     final_status = "success" if completed else "paused"
                     if completed:
-                        self._update_memory(result, memory_id)
+                        self._update_memory(
+                            result,
+                            memory_id,
+                            state["runtime_metadata"][_MEMORY_MESSAGE_START],
+                        )
                     return result
             except Exception as exc:
                 execution.error = exc
@@ -313,6 +327,9 @@ class AgentRuntime:
             "trace_id": trace_id,
             "agent_span_id": agent_span_id,
             "parent_span_id": parent_span_id,
+            _MEMORY_MESSAGE_START: self._message_count(
+                await self.graph.aget_state(graph_config)
+            ),
         }
         with self.observer.trace(
             agent_name=self.definition.name,
@@ -350,7 +367,11 @@ class AgentRuntime:
                     completed = self._completed(graph_config)
                     final_status = "success" if completed else "paused"
                     if completed:
-                        await self._aupdate_memory(result, memory_id)
+                        await self._aupdate_memory(
+                            result,
+                            memory_id,
+                            state["runtime_metadata"][_MEMORY_MESSAGE_START],
+                        )
                     return result
             except Exception as exc:
                 execution.error = exc
@@ -450,6 +471,9 @@ class AgentRuntime:
             "trace_id": trace_id,
             "agent_span_id": agent_span_id,
             "parent_span_id": parent_span_id,
+            _MEMORY_MESSAGE_START: self._message_count(
+                self.graph.get_state(graph_config)
+            ),
         }
 
         def iterator() -> Iterator[Any]:
@@ -491,7 +515,11 @@ class AgentRuntime:
                         completed = self._completed(graph_config)
                         final_status = "success" if completed else "paused"
                         if completed:
-                            self._update_memory(final, memory_id)
+                            self._update_memory(
+                                final,
+                                memory_id,
+                                state["runtime_metadata"][_MEMORY_MESSAGE_START],
+                            )
                 except Exception as exc:
                     execution.error = exc
                     if not after_called:
@@ -598,6 +626,9 @@ class AgentRuntime:
         }
 
         async def iterator() -> AsyncIterator[Any]:
+            state["runtime_metadata"][_MEMORY_MESSAGE_START] = self._message_count(
+                await self.graph.aget_state(graph_config)
+            )
             with self.observer.trace(
                 agent_name=self.definition.name,
                 session_id=public_id,
@@ -640,7 +671,11 @@ class AgentRuntime:
                         completed = not tuple(snapshot.next)
                         final_status = "success" if completed else "paused"
                         if completed:
-                            await self._aupdate_memory(final, memory_id)
+                            await self._aupdate_memory(
+                                final,
+                                memory_id,
+                                state["runtime_metadata"][_MEMORY_MESSAGE_START],
+                            )
                 except Exception as exc:
                     execution.error = exc
                     if not after_called:
@@ -813,14 +848,19 @@ class AgentRuntime:
             metadata={"memory_id": memory_id, "count": len(loaded)},
         )
 
-    def _update_memory(self, result: Mapping[str, Any], memory_id: str | None) -> None:
+    def _update_memory(
+        self,
+        result: Mapping[str, Any],
+        memory_id: str | None,
+        message_start: int = 0,
+    ) -> None:
         if self.memory and memory_id:
             started = time.perf_counter()
             try:
                 self.memory.update(
                     self.definition.name,
                     memory_id.strip(),
-                    list(result.get("messages", [])),
+                    list(result.get("messages", []))[message_start:],
                 )
             except Exception as exc:
                 self.observer.emit(
@@ -839,7 +879,10 @@ class AgentRuntime:
             )
 
     async def _aupdate_memory(
-        self, result: Mapping[str, Any], memory_id: str | None
+        self,
+        result: Mapping[str, Any],
+        memory_id: str | None,
+        message_start: int = 0,
     ) -> None:
         if self.memory and memory_id:
             started = time.perf_counter()
@@ -847,7 +890,7 @@ class AgentRuntime:
                 await self.memory.aupdate(
                     self.definition.name,
                     memory_id.strip(),
-                    list(result.get("messages", [])),
+                    list(result.get("messages", []))[message_start:],
                 )
             except Exception as exc:
                 self.observer.emit(
@@ -1071,7 +1114,11 @@ class AgentRuntime:
                     completed = self._completed(config)
                     final_status = "success" if completed else "paused"
                     if completed:
-                        self._update_memory(result, memory_id)
+                        self._update_memory(
+                            result,
+                            memory_id,
+                            int(metadata.get(_MEMORY_MESSAGE_START, 0)),
+                        )
                     return result
             except Exception as exc:
                 execution.error = exc
@@ -1145,7 +1192,11 @@ class AgentRuntime:
                     completed = self._completed(config)
                     final_status = "success" if completed else "paused"
                     if completed:
-                        await self._aupdate_memory(result, memory_id)
+                        await self._aupdate_memory(
+                            result,
+                            memory_id,
+                            int(metadata.get(_MEMORY_MESSAGE_START, 0)),
+                        )
                     return result
             except Exception as exc:
                 execution.error = exc

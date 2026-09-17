@@ -556,6 +556,52 @@ class NamespaceMemory:
             ]
 
 
+class RecordingMemory:
+    def __init__(self):
+        self.updates = []
+
+    def load(self, agent_name, memory_id, query):
+        return []
+
+    def update(self, agent_name, memory_id, messages):
+        self.updates.append(list(messages))
+
+    async def aupdate(self, agent_name, memory_id, messages):
+        self.updates.append(list(messages))
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_long_term_memory_only_processes_messages_from_current_turn(async_mode):
+    model = RecordingModel(
+        responses=[AIMessage(content="first reply"), AIMessage(content="second reply")]
+    )
+    agent = create_agent(
+        name=f"incremental-memory-{async_mode}",
+        instructions="Remember without reprocessing history.",
+        model=model,
+        memory=True,
+    )
+    memory = RecordingMemory()
+    agent.runtime.memory = memory
+
+    if async_mode:
+        async def run():
+            await agent.ainvoke("first request", session_id="session", memory_id="user")
+            await agent.ainvoke("second request", session_id="session", memory_id="user")
+
+        asyncio.run(run())
+    else:
+        agent.invoke("first request", session_id="session", memory_id="user")
+        agent.invoke("second request", session_id="session", memory_id="user")
+
+    assert [
+        [message.content for message in messages] for messages in memory.updates
+    ] == [
+        ["first request", "first reply"],
+        ["second request", "second reply"],
+    ]
+
+
 def test_subagent_memory_identity_propagates_and_agent_names_isolate_it():
     memory = NamespaceMemory()
     sub_a_model = RecordingModel(
