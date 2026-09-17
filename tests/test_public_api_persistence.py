@@ -224,12 +224,13 @@ def test_async_agent_result_auto_session_can_resume_hitl(persistent_defaults):
 
 def test_agent_result_prefers_structured_output(persistent_defaults):
     expected = {"answer": "structured"}
+    model = ResultModel(
+        responses=[AIMessage(content="draft")], structured_outputs=[expected]
+    )
     agent = create_agent(
         name="result-structured",
         instructions="format",
-        model=ResultModel(
-            responses=[AIMessage(content="draft")], structured_outputs=[expected]
-        ),
+        model=model,
         response_format=dict,
     )
 
@@ -238,6 +239,8 @@ def test_agent_result_prefers_structured_output(persistent_defaults):
     assert result.structured_output == expected
     assert result.session_id == "known-session"
     assert result.status == "completed"
+    assert model.seen == []
+    assert len(model.structured_seen) == 1
 
 
 def test_stream_requires_public_session_and_hitl_can_resume_and_clear(

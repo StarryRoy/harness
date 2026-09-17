@@ -19,6 +19,7 @@ class AgentState(TypedDict, total=False):
     summarized_messages: list[AnyMessage]
     context: dict[str, Any]
     structured_response: Any
+    structured_output_complete: bool
     plan: dict[str, Any]
     step_failed: bool
     pending_tool_calls: list[dict[str, Any]]

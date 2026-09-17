@@ -54,6 +54,8 @@ print(result.output)
 `output`、`status`、`session_id`、`structured_output` 和 `interrupts`；需要诊断或
 高级编排时才读取完整的 `result.state`。状态为 `completed`、`paused` 或 `error`。
 启用 Structured Output 时，格式化结果同时作为 `output` 和 `structured_output` 返回。
+最终响应由执行节点直接通过 `model.with_structured_output(response_format)` 生成；ReAct
+工具批次结束后以及 PlanExecute 进入综合阶段后都不会再追加独立的格式化模型调用。
 
 所有执行都使用公开 `session_id`。调用时未传 ID，Harness 会生成 `session-...` 并通过
 `AgentResult.session_id` 返回；HITL 暂停后可以直接用该 ID 恢复，不存在应用层无法取得的
@@ -192,9 +194,10 @@ result = agent.invoke(
 业务字段与 Harness State 在建图时合并。`messages`、`iteration`、
 `runtime_metadata`、`available_skills`、`loaded_skills`、`active_skill`、
 `skill_state`、`session_turn`、`summary`、`summarized_messages`、`context`、
-`structured_response`、`plan`、`step_failed`、`pending_tool_calls`、
-`tool_call_index` 和 `long_term_memories` 是完整的 Harness 保留字段，业务 Schema 不能
-覆盖。调用参数 `context=` 是单次执行的业务 Runtime Context，不写入会话 State。
+`structured_response`、`structured_output_complete`、`plan`、`step_failed`、
+`pending_tool_calls`、`tool_call_index` 和 `long_term_memories` 是完整的 Harness 保留字段，
+业务 Schema 不能覆盖。调用参数 `context=` 是单次执行的业务 Runtime Context，不写入
+会话 State。
 
 长会话达到消息或 token 阈值后，由 LangMem `summarize_messages` 压缩旧消息并保留
 近期上下文；Harness 只提供默认阈值和接线。模型上下文始终由“压缩快照 + 快照后新增

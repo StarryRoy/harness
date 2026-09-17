@@ -75,6 +75,11 @@ class _ExecutionStrategySupport:
         model = (
             definition.model.bind_tools(all_tools) if all_tools else definition.model
         )
+        structured_model = (
+            definition.model.with_structured_output(definition.response_format)
+            if definition.response_format is not None
+            else None
+        )
 
         def prompt(state: Mapping[str, Any]) -> list[Any]:
             execution = middleware.current_execution()
@@ -97,7 +102,10 @@ class _ExecutionStrategySupport:
             return messages
 
         def prepare_node(state: Mapping[str, Any]) -> dict[str, Any]:
-            return context.prepare_turn(state)
+            return {
+                **context.prepare_turn(state),
+                "structured_output_complete": False,
+            }
 
         def prepare_route(
             state: Mapping[str, Any],
@@ -112,6 +120,7 @@ class _ExecutionStrategySupport:
             config: RunnableConfig,
             messages: list[Any],
             purpose: str,
+            response_format: Any | None = None,
         ) -> Any:
             request = ModelRequest(
                 middleware.current_execution(),
@@ -119,14 +128,12 @@ class _ExecutionStrategySupport:
                 messages,
                 config,
                 purpose=purpose,
-                tools=tuple(all_tools) if purpose == "agent" else (),
-                response_format=(
-                    _PlanOutput
-                    if purpose in {"planner", "replanner"}
-                    else definition.response_format
-                    if purpose == "format"
-                    else None
+                tools=(
+                    tuple(all_tools)
+                    if purpose == "agent" and response_format is None
+                    else ()
                 ),
+                response_format=response_format,
             )
             try:
                 return middleware.model(
@@ -143,6 +150,7 @@ class _ExecutionStrategySupport:
             config: RunnableConfig,
             messages: list[Any],
             purpose: str,
+            response_format: Any | None = None,
         ) -> Any:
             request = ModelRequest(
                 middleware.current_execution(),
@@ -150,14 +158,12 @@ class _ExecutionStrategySupport:
                 messages,
                 config,
                 purpose=purpose,
-                tools=tuple(all_tools) if purpose == "agent" else (),
-                response_format=(
-                    _PlanOutput
-                    if purpose in {"planner", "replanner"}
-                    else definition.response_format
-                    if purpose == "format"
-                    else None
+                tools=(
+                    tuple(all_tools)
+                    if purpose == "agent" and response_format is None
+                    else ()
                 ),
+                response_format=response_format,
             )
             try:
                 return await middleware.amodel(
@@ -170,18 +176,63 @@ class _ExecutionStrategySupport:
                     f"Async model call failed ({purpose})", cause=exc
                 ) from exc
 
+        def use_structured_model(state: Mapping[str, Any]) -> bool:
+            if structured_model is None or state.get("structured_output_complete"):
+                return False
+            if planning:
+                return state.get("plan", {}).get("status") in {
+                    "synthesizing",
+                    "completed",
+                    "partial",
+                    "failed",
+                }
+            if not all_tools:
+                return True
+            message = state.get("messages", [None])[-1]
+            return isinstance(message, ToolMessage) or (
+                isinstance(message, AIMessage) and not message.tool_calls
+            )
+
         def model_node(
             state: Mapping[str, Any], config: RunnableConfig
         ) -> dict[str, Any]:
             iteration = int(state.get("iteration", 0)) + 1
-            response = call_model(model, state, config, prompt(state), "agent")
+            structured = use_structured_model(state)
+            response = call_model(
+                structured_model if structured else model,
+                state,
+                config,
+                prompt(state),
+                "agent",
+                definition.response_format if structured else None,
+            )
+            if structured:
+                return {
+                    "structured_response": response,
+                    "structured_output_complete": True,
+                    "iteration": iteration,
+                }
             return {"messages": [response], "iteration": iteration}
 
         async def async_model_node(
             state: Mapping[str, Any], config: RunnableConfig
         ) -> dict[str, Any]:
             iteration = int(state.get("iteration", 0)) + 1
-            response = await acall_model(model, state, config, prompt(state), "agent")
+            structured = use_structured_model(state)
+            response = await acall_model(
+                structured_model if structured else model,
+                state,
+                config,
+                prompt(state),
+                "agent",
+                definition.response_format if structured else None,
+            )
+            if structured:
+                return {
+                    "structured_response": response,
+                    "structured_output_complete": True,
+                    "iteration": iteration,
+                }
             return {"messages": [response], "iteration": iteration}
 
         try:
@@ -269,8 +320,10 @@ class _ExecutionStrategySupport:
         def route(
             state: Mapping[str, Any],
         ) -> Literal[
-            "tools", "replan", "advance", "fail", "finalize", "format", "done"
+            "tools", "replan", "advance", "fail", "finalize", "model", "done"
         ]:
+            if state.get("structured_output_complete"):
+                return "finalize" if planning else "done"
             message = state["messages"][-1]
             if isinstance(message, AIMessage) and message.tool_calls:
                 if (
@@ -301,7 +354,7 @@ class _ExecutionStrategySupport:
                 return "advance"
             if planning:
                 return "finalize"
-            return "format" if definition.response_format is not None else "done"
+            return "model" if definition.response_format is not None else "done"
 
         def advance_node(state: Mapping[str, Any]) -> dict[str, Any]:
             plan = dict(state["plan"])
@@ -412,7 +465,9 @@ class _ExecutionStrategySupport:
                         content=f"Create a plan of at most {self.max_steps} concrete steps."
                     ),
                 )
-                value = call_model(planner, state, config, request, "planner")
+                value = call_model(
+                    planner, state, config, request, "planner", _PlanOutput
+                )
                 raw_steps = (
                     value.get("steps", [])
                     if isinstance(value, Mapping)
@@ -473,7 +528,9 @@ class _ExecutionStrategySupport:
                         )
                     ),
                 )
-                value = call_model(planner, state, config, request, "replanner")
+                value = call_model(
+                    planner, state, config, request, "replanner", _PlanOutput
+                )
                 raw = (
                     value.get("steps", [])
                     if isinstance(value, Mapping)
@@ -532,14 +589,16 @@ class _ExecutionStrategySupport:
                 {"summarize": "summarize", "model": "model"},
             )
             graph.add_edge("summarize", "model")
-        destinations: dict[str, Any] = {"tools": "tools", "done": END}
+        destinations: dict[str, Any] = {
+            "tools": "tools",
+            "model": "model",
+            "done": END,
+        }
         if planning:
             destinations["advance"] = "advance"
             destinations["replan"] = "replan"
             destinations["fail"] = "fail"
             destinations["finalize"] = "finalize"
-        if definition.response_format is not None:
-            destinations["format"] = "format"
         graph.add_conditional_edges("model", route, destinations)
 
         def tool_route(state: Mapping[str, Any]) -> Literal["tools", "model"]:
@@ -549,31 +608,7 @@ class _ExecutionStrategySupport:
             "tools", tool_route, {"tools": "tools", "model": "model"}
         )
         if planning:
-            graph.add_edge(
-                "finalize", "format" if definition.response_format is not None else END
-            )
-
-        if definition.response_format is not None:
-            formatter = definition.model.with_structured_output(
-                definition.response_format
-            )
-
-            def format_node(
-                state: Mapping[str, Any], config: RunnableConfig
-            ) -> dict[str, Any]:
-                result = call_model(formatter, state, config, prompt(state), "format")
-                return {"structured_response": result}
-
-            async def async_format_node(
-                state: Mapping[str, Any], config: RunnableConfig
-            ) -> dict[str, Any]:
-                result = await acall_model(
-                    formatter, state, config, prompt(state), "format"
-                )
-                return {"structured_response": result}
-
-            graph.add_node("format", RunnableLambda(format_node, async_format_node))
-            graph.add_edge("format", END)
+            graph.add_edge("finalize", END)
         return graph.compile(checkpointer=checkpointer)
 
     @staticmethod

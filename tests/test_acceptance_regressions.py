@@ -514,10 +514,7 @@ def test_subagent_continues_through_multiple_hitl_decisions(
 def test_plan_execute_with_structured_output_runs_full_graph():
     expected = {"answer": "formatted plan result"}
     model = RecordingModel(
-        responses=[
-            AIMessage(content="step result"),
-            AIMessage(content="final synthesis"),
-        ],
+        responses=[AIMessage(content="step result")],
         structured_outputs=[
             {"steps": [{"description": "execute the only step"}]},
             expected,
@@ -535,9 +532,45 @@ def test_plan_execute_with_structured_output_runs_full_graph():
 
     assert result["plan"]["status"] == "completed"
     assert result["plan"]["steps"][0]["result"] == "step result"
-    assert result["messages"][-1].content == "final synthesis"
+    assert result["messages"][-1].content == "step result"
     assert result["structured_response"] == expected
+    assert len(model.seen) == 1
     assert len(model.structured_seen) == 2
+
+
+def test_react_structured_output_is_the_final_model_call_after_tools():
+    expected = {"answer": "structured tool result"}
+    model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[tool_call("lookup", {"value": "x"}, "lookup-1")],
+            )
+        ],
+        structured_outputs=[expected],
+    )
+
+    def lookup(value: str) -> str:
+        """Look up a value."""
+        return f"found:{value}"
+
+    agent = create_agent(
+        name="react-structured-tool",
+        instructions="Use the tool and return structured output.",
+        model=model,
+        tools=[StructuredTool.from_function(lookup)],
+        response_format=dict,
+    )
+
+    result = agent.invoke("look it up")
+
+    assert result["structured_response"] == expected
+    assert len(model.seen) == 1
+    assert len(model.structured_seen) == 1
+    assert any(
+        isinstance(message, ToolMessage) and message.content == "found:x"
+        for message in model.structured_seen[0]
+    )
 
 
 class NamespaceMemory:
