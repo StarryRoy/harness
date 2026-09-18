@@ -1,11 +1,13 @@
 import asyncio
 import time
+from typing import TypedDict
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import StructuredTool
+from langgraph.types import Command
 from pydantic import Field
 
 from agent_harness import (
@@ -831,6 +833,71 @@ def test_tool_retry_attempts_are_each_counted_by_call_limit():
 
     assert len(attempts) == 2
     assert execution.metadata["middleware_calls"] == 3
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_tool_middleware_receives_state_and_preserves_command(async_mode):
+    class BusinessState(TypedDict, total=False):
+        marker: str
+
+    class StateCommandMiddleware(AgentMiddleware):
+        def __init__(self):
+            self.seen = []
+
+        def _command(self, request):
+            self.seen.append(request.state)
+            assert request.state["marker"] in {"before", "after"}
+            assert request.state["messages"][-1].tool_calls
+            return Command(update={"marker": "after"})
+
+        def wrap_tool_call(self, request, call_next):
+            return self._command(request)
+
+        async def awrap_tool_call(self, request, call_next):
+            return self._command(request)
+
+    model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    tool_call("lookup", {"value": "x"}, "lookup-1"),
+                    tool_call("lookup", {"value": "y"}, "lookup-2"),
+                ],
+            ),
+            AIMessage(content="done"),
+        ]
+    )
+
+    def lookup(value: str) -> str:
+        """Look up a value."""
+        return value
+
+    middleware = StateCommandMiddleware()
+    agent = create_agent(
+        name=f"command-{async_mode}",
+        instructions="Use the tool.",
+        model=model,
+        tools=[StructuredTool.from_function(lookup)],
+        state_schema=BusinessState,
+        middleware=[middleware],
+        middleware_mode="replace",
+    )
+    input_state = {"messages": [HumanMessage(content="go")], "marker": "before"}
+    result = (
+        asyncio.run(agent.ainvoke(input_state))
+        if async_mode
+        else agent.invoke(input_state)
+    )
+
+    assert result["marker"] == "after"
+    assert result["messages"][-1].content == "done"
+    assert not any(isinstance(message, ToolMessage) for message in result["messages"])
+    assert result["pending_tool_calls"] == []
+    assert result["tool_call_index"] == 0
+    assert len(middleware.seen) == 2
+    assert middleware.seen[1]["pending_tool_calls"]
+    assert middleware.seen[1]["tool_call_index"] == 1
 
 
 def test_fallback_reenters_downstream_model_middleware():

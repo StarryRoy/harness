@@ -69,6 +69,9 @@ class ToolRequest:
     arguments: Mapping[str, Any]
     config: Mapping[str, Any]
     tool_call_id: str
+    # The complete LangGraph state for this tool node. Middleware should return
+    # an explicit LangGraph Command to persist any business-state change.
+    state: Mapping[str, Any] = field(default_factory=dict)
 
 
 ModelHandler = Callable[[ModelRequest], Any]

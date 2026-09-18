@@ -14,7 +14,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_core.utils.pydantic import is_basemodel_subclass
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
 from .context import AgentContextManager
 from .debug import DebugHandler
@@ -447,7 +447,7 @@ class _ExecutionStrategySupport:
 
         def tool_node(
             state: Mapping[str, Any], config: RunnableConfig
-        ) -> dict[str, Any]:
+        ) -> dict[str, Any] | Command:
             return self._execute_tools(
                 state,
                 executable,
@@ -461,7 +461,7 @@ class _ExecutionStrategySupport:
 
         async def async_tool_node(
             state: Mapping[str, Any], config: RunnableConfig
-        ) -> dict[str, Any]:
+        ) -> dict[str, Any] | Command:
             return await self._aexecute_tools(
                 state,
                 executable,
@@ -891,7 +891,7 @@ class _ExecutionStrategySupport:
         middleware: MiddlewarePipeline,
         config: RunnableConfig,
         debug: DebugHandler,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | Command:
         calls = list(state.get("pending_tool_calls", []))
         index = int(state.get("tool_call_index", 0))
         if not calls:
@@ -925,6 +925,7 @@ class _ExecutionStrategySupport:
                 args,
                 config,
                 call["id"],
+                state,
             )
             value = middleware.tool(
                 request, lambda req: req.tool.invoke(req.arguments, req.config)
@@ -940,6 +941,8 @@ class _ExecutionStrategySupport:
                 execution.metadata.pop("current_tool_call_id", None)
             else:
                 execution.metadata["current_tool_call_id"] = previous_call_id
+        if isinstance(value, Command):
+            return self._advance_tool_command(value, calls, index + 1)
         if succeeded:
             loaded, skill_state, active = self._skill_state_after(
                 call,
@@ -950,7 +953,7 @@ class _ExecutionStrategySupport:
                 int(state.get("session_turn", 1)),
             )
         next_index = index + 1
-        return {
+        update = {
             "messages": [self._result(call, value)],
             "loaded_skills": loaded,
             "active_skill": active,
@@ -959,6 +962,7 @@ class _ExecutionStrategySupport:
             "pending_tool_calls": calls if next_index < len(calls) else [],
             "tool_call_index": next_index if next_index < len(calls) else 0,
         }
+        return update
 
     async def _aexecute_tools(
         self,
@@ -970,7 +974,7 @@ class _ExecutionStrategySupport:
         middleware: MiddlewarePipeline,
         config: RunnableConfig,
         debug: DebugHandler,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | Command:
         calls = list(state.get("pending_tool_calls", []))
         index = int(state.get("tool_call_index", 0))
         if not calls:
@@ -1004,6 +1008,7 @@ class _ExecutionStrategySupport:
                 args,
                 config,
                 call["id"],
+                state,
             )
             value = await middleware.atool(
                 request, lambda req: req.tool.ainvoke(req.arguments, req.config)
@@ -1019,6 +1024,8 @@ class _ExecutionStrategySupport:
                 execution.metadata.pop("current_tool_call_id", None)
             else:
                 execution.metadata["current_tool_call_id"] = previous_call_id
+        if isinstance(value, Command):
+            return self._advance_tool_command(value, calls, index + 1)
         if succeeded:
             loaded, skill_state, active = self._skill_state_after(
                 call,
@@ -1029,7 +1036,7 @@ class _ExecutionStrategySupport:
                 int(state.get("session_turn", 1)),
             )
         next_index = index + 1
-        return {
+        update = {
             "messages": [self._result(call, value)],
             "loaded_skills": loaded,
             "active_skill": active,
@@ -1038,6 +1045,27 @@ class _ExecutionStrategySupport:
             "pending_tool_calls": calls if next_index < len(calls) else [],
             "tool_call_index": next_index if next_index < len(calls) else 0,
         }
+        return update
+
+    @staticmethod
+    def _advance_tool_command(
+        value: Command, calls: list[dict[str, Any]], next_index: int
+    ) -> Command:
+        command_update = (
+            dict(value.update) if isinstance(value.update, Mapping) else {}
+        )
+        command_update.update(
+            {
+                "pending_tool_calls": calls if next_index < len(calls) else [],
+                "tool_call_index": next_index if next_index < len(calls) else 0,
+            }
+        )
+        return Command(
+            graph=value.graph,
+            update=command_update,
+            resume=value.resume,
+            goto=value.goto,
+        )
 
     @staticmethod
     def _approved_arguments(
