@@ -8,11 +8,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from agent_harness import (
     AgentMiddleware,
     ContextPolicy,
+    ModelError,
     PlanExecuteStrategy,
     RuntimeConfig,
     Skill,
@@ -898,6 +899,84 @@ def test_tool_middleware_receives_state_and_preserves_command(async_mode):
     assert len(middleware.seen) == 2
     assert middleware.seen[1]["pending_tool_calls"]
     assert middleware.seen[1]["tool_call_index"] == 1
+
+
+def test_structured_schema_normalization_is_shared_by_tool_and_model_paths():
+    class Left(BaseModel):
+        x: int
+
+    class Right(BaseModel):
+        y: str
+
+    def lookup(value: str) -> str:
+        """Look up a value."""
+        return value
+
+    union_schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"x": {"type": "integer"}},
+                "required": ["x"],
+            },
+            {
+                "type": "object",
+                "properties": {"y": {"type": "string"}},
+                "required": ["y"],
+            },
+        ]
+    }
+    tool_model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    tool_call(
+                        "agent_harness_structured_response",
+                        {"value": {"x": 1}},
+                        "response-1",
+                    )
+                ],
+            )
+        ]
+    )
+    tool_agent = create_agent(
+        name="structured-schema-tool",
+        instructions="Return structured output.",
+        model=tool_model,
+        tools=[StructuredTool.from_function(lookup)],
+        response_format=union_schema,
+    )
+    tool_result = tool_agent.invoke("go")
+    assert tool_result["structured_response"] == {"x": 1}
+    assert tool_model.bound_tool_names == ["lookup", "agent_harness_structured_response"]
+
+    model = RecordingModel(
+        responses=[], structured_outputs=[{"value": {"y": "ok"}}]
+    )
+    model_agent = create_agent(
+        name="structured-schema-model",
+        instructions="Return structured output.",
+        model=model,
+        response_format=Left | Right,
+    )
+    model_result = model_agent.invoke("go")
+    assert isinstance(model_result["structured_response"], Right)
+    assert model_result["structured_response"].y == "ok"
+
+    invalid_model = RecordingModel(responses=[], structured_outputs=[{"answer": 1}])
+    invalid_agent = create_agent(
+        name="structured-schema-invalid",
+        instructions="Return structured output.",
+        model=invalid_model,
+        response_format={
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
+    )
+    with pytest.raises(ModelError, match="Structured response validation failed"):
+        invalid_agent.invoke("go")
 
 
 def test_fallback_reenters_downstream_model_middleware():

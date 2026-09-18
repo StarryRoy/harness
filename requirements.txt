@@ -2,6 +2,7 @@
 langchain-core>=0.3.30,<2
 langgraph>=0.2.60,<2
 langmem==0.0.30
+jsonschema>=4,<5
 PyYAML>=6.0,<7
 # Optional Phase 3 integrations (install with `pip install -e .[enterprise]`)
 # langchain-mcp-adapters>=0.1,<1

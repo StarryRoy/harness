@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
+from jsonschema import validate as validate_json_schema
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool, StructuredTool
@@ -15,6 +17,7 @@ from langchain_core.utils.pydantic import is_basemodel_subclass
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
+from pydantic import TypeAdapter
 
 from .context import AgentContextManager
 from .debug import DebugHandler
@@ -24,6 +27,19 @@ from .middleware import MiddlewarePipeline, ModelRequest, ToolRequest
 from .observability import EventType
 from .skills import SkillError, SkillRegistry, SkillScriptRunner
 from .state import compose_state_schema
+
+
+@dataclass(frozen=True, slots=True)
+class _StructuredSchema:
+    original: Any
+    schema: dict[str, Any]
+    parameters: dict[str, Any]
+    wrapped: bool
+
+    def unwrap(self, value: Any) -> Any:
+        if self.wrapped and isinstance(value, Mapping) and "value" in value:
+            return value["value"]
+        return value
 
 
 class AgentStrategy(ABC):
@@ -74,9 +90,14 @@ class _ExecutionStrategySupport:
             )
         all_tools: list[BaseTool] = [*definition.tools, *internal_tools]
         executable = {tool.name: tool for tool in all_tools}
+        structured_schema = (
+            self._normalize_structured_schema(definition.response_format)
+            if definition.response_format is not None
+            else None
+        )
         response_tool = (
-            self._structured_response_tool(definition.response_format)
-            if definition.response_format is not None and all_tools and not planning
+            self._structured_response_tool(structured_schema)
+            if structured_schema is not None and all_tools and not planning
             else None
         )
         if response_tool is not None and response_tool["function"]["name"] in executable:
@@ -96,8 +117,8 @@ class _ExecutionStrategySupport:
             else definition.model
         )
         structured_model = (
-            definition.model.with_structured_output(definition.response_format)
-            if definition.response_format is not None and response_tool is None
+            definition.model.with_structured_output(structured_schema.parameters)
+            if structured_schema is not None and response_tool is None
             else None
         )
 
@@ -162,7 +183,11 @@ class _ExecutionStrategySupport:
                 config,
                 purpose=purpose,
                 tools=tools,
-                response_format=response_format,
+                response_format=(
+                    self._normalize_structured_schema(response_format).parameters
+                    if response_format is not None
+                    else None
+                ),
                 tool_choice=tool_choice,
             )
             try:
@@ -191,7 +216,11 @@ class _ExecutionStrategySupport:
                 config,
                 purpose=purpose,
                 tools=tools,
-                response_format=response_format,
+                response_format=(
+                    self._normalize_structured_schema(response_format).parameters
+                    if response_format is not None
+                    else None
+                ),
                 tool_choice=tool_choice,
             )
             try:
@@ -220,7 +249,7 @@ class _ExecutionStrategySupport:
         def model_update(response: Any, iteration: int) -> dict[str, Any]:
             if response_tool is not None:
                 parsed = self._parse_structured_response_tool(
-                    response, response_tool, definition.response_format
+                    response, response_tool, structured_schema
                 )
                 if parsed is not None:
                     return {
@@ -251,7 +280,9 @@ class _ExecutionStrategySupport:
             )
             if structured:
                 return {
-                    "structured_response": response,
+                    "structured_response": self._validate_structured_result(
+                        response, structured_schema
+                    ),
                     "structured_output_complete": True,
                     "iteration": iteration,
                 }
@@ -274,7 +305,9 @@ class _ExecutionStrategySupport:
             )
             if structured:
                 return {
-                    "structured_response": response,
+                    "structured_response": self._validate_structured_result(
+                        response, structured_schema
+                    ),
                     "structured_output_complete": True,
                     "iteration": iteration,
                 }
@@ -656,37 +689,104 @@ class _ExecutionStrategySupport:
         return graph.compile(checkpointer=checkpointer)
 
     @staticmethod
-    def _structured_response_tool(response_format: Any) -> dict[str, Any]:
-        name = "agent_harness_structured_response"
+    def _response_format_schema(response_format: Any) -> dict[str, Any]:
         if response_format is dict:
-            parameters: dict[str, Any] = {
-                "type": "object",
-                "additionalProperties": True,
-            }
-        elif isinstance(response_format, dict) and response_format.get("type") == "function":
-            parameters = dict(response_format.get("function", {}).get("parameters", {}))
-        elif isinstance(response_format, dict) and "function" in response_format:
-            parameters = dict(response_format["function"].get("parameters", {}))
-        elif isinstance(response_format, dict):
-            parameters = dict(response_format)
-            parameters.pop("title", None)
-        else:
+            return {"type": "object", "additionalProperties": True}
+        if isinstance(response_format, Mapping):
+            if response_format.get("type") == "function":
+                function = response_format.get("function", {})
+                schema = function.get("parameters") if isinstance(function, Mapping) else None
+            elif "function" in response_format:
+                function = response_format["function"]
+                schema = function.get("parameters") if isinstance(function, Mapping) else None
+            elif "parameters" in response_format and (
+                "name" in response_format or "description" in response_format
+            ):
+                schema = response_format["parameters"]
+            else:
+                schema = response_format
+            if not isinstance(schema, Mapping):
+                raise TypeError("response_format parameters must be a JSON Schema object")
+            return dict(schema)
+        if isinstance(response_format, type) and is_basemodel_subclass(response_format):
+            schema_builder = getattr(response_format, "model_json_schema", None)
+            schema = (
+                schema_builder()
+                if callable(schema_builder)
+                else response_format.schema()
+            )
+            return dict(schema)
+        try:
+            return dict(TypeAdapter(response_format).json_schema())
+        except (TypeError, ValueError, RuntimeError):
             converted = convert_to_openai_tool(response_format)
-            parameters = dict(converted["function"]["parameters"])
+            return dict(converted["function"]["parameters"])
+
+    @classmethod
+    def _normalize_structured_schema(cls, response_format: Any) -> _StructuredSchema:
+        schema = cls._response_format_schema(response_format)
+        if schema.get("type") == "object":
+            schema.setdefault("title", "agent_harness_structured_response")
+            return _StructuredSchema(response_format, schema, schema, False)
+
+        parameters: dict[str, Any] = {
+            "title": "agent_harness_structured_response",
+            "type": "object",
+            "properties": {"value": schema},
+            "required": ["value"],
+        }
+        for key in ("$defs", "definitions"):
+            if key in schema:
+                parameters[key] = schema[key]
+        return _StructuredSchema(response_format, schema, parameters, True)
+
+    @staticmethod
+    def _structured_response_tool(
+        structured_schema: _StructuredSchema,
+    ) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
-                "name": name,
+                "name": "agent_harness_structured_response",
                 "description": "Submit the final response matching the required schema.",
-                "parameters": parameters,
+                "parameters": structured_schema.parameters,
             },
         }
 
     @staticmethod
+    def _validate_structured_result(
+        value: Any, structured_schema: _StructuredSchema
+    ) -> Any:
+        value = structured_schema.unwrap(value)
+        response_format = structured_schema.original
+        try:
+            if isinstance(response_format, Mapping):
+                validate_json_schema(value, structured_schema.schema)
+                return value
+            if isinstance(response_format, type) and is_basemodel_subclass(response_format):
+                validator = getattr(response_format, "model_validate", None)
+                return (
+                    validator(value)
+                    if callable(validator)
+                    else response_format.parse_obj(value)
+                )
+            try:
+                adapter = TypeAdapter(response_format)
+            except (TypeError, ValueError, RuntimeError):
+                validate_json_schema(value, structured_schema.schema)
+                return value
+            return adapter.validate_python(value)
+        except Exception as exc:
+            raise ModelError(
+                "Structured response validation failed", cause=exc
+            ) from exc
+
+    @classmethod
     def _parse_structured_response_tool(
+        cls,
         response: Any,
         response_tool: Mapping[str, Any],
-        response_format: Any,
+        structured_schema: _StructuredSchema,
     ) -> Any | None:
         if not isinstance(response, AIMessage):
             return None
@@ -701,20 +801,7 @@ class _ExecutionStrategySupport:
         arguments = matches[0].get("args", {})
         if not isinstance(arguments, Mapping):
             raise ModelError("Structured response tool arguments must be an object")
-        value = dict(arguments)
-        if isinstance(response_format, type) and is_basemodel_subclass(response_format):
-            try:
-                validator = getattr(response_format, "model_validate", None)
-                return (
-                    validator(value)
-                    if callable(validator)
-                    else response_format.parse_obj(value)
-                )
-            except Exception as exc:
-                raise ModelError(
-                    "Structured response validation failed", cause=exc
-                ) from exc
-        return value
+        return cls._validate_structured_result(dict(arguments), structured_schema)
 
     @staticmethod
     def _skill_tools(
