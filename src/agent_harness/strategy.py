@@ -1005,10 +1005,11 @@ class _ExecutionStrategySupport:
         execution.metadata["current_tool_call_id"] = call["id"]
         try:
             self._require_loaded(call, loaded, registry)
-            args = self._approved_arguments(tools[call["name"]], call, debug)
+            tool = tools[call["name"]]
+            args = self._approved_arguments(tool, call, debug)
             request = ToolRequest(
                 execution,
-                tools[call["name"]],
+                tool,
                 args,
                 config,
                 call["id"],
@@ -1088,10 +1089,11 @@ class _ExecutionStrategySupport:
         execution.metadata["current_tool_call_id"] = call["id"]
         try:
             self._require_loaded(call, loaded, registry)
-            args = self._approved_arguments(tools[call["name"]], call, debug)
+            tool = tools[call["name"]]
+            args = self._approved_arguments(tool, call, debug)
             request = ToolRequest(
                 execution,
-                tools[call["name"]],
+                tool,
                 args,
                 config,
                 call["id"],
@@ -1155,12 +1157,31 @@ class _ExecutionStrategySupport:
         )
 
     @staticmethod
+    def _validated_arguments(
+        tool: BaseTool, call: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Validate a model Tool Call without invoking the tool.
+
+        ``BaseTool.run`` performs this same parsing immediately before calling
+        the tool implementation.  Do it explicitly here so approval interrupts
+        are only created for structurally valid calls.
+        """
+        raw_args = call.get("args")
+        if not isinstance(raw_args, Mapping):
+            raise TypeError("Tool call arguments must be an object")
+        _, parsed_args = tool._to_args_and_kwargs(dict(raw_args), call.get("id"))
+        if not isinstance(parsed_args, dict):
+            raise TypeError("Tool call arguments must be an object")
+        return parsed_args
+
+    @staticmethod
     def _approved_arguments(
         tool: BaseTool, call: Mapping[str, Any], debug: DebugHandler
     ) -> dict[str, Any]:
         metadata = tool.metadata or {}
         if not metadata.get("harness_approval"):
             return dict(call["args"])
+        validated_args = _ExecutionStrategySupport._validated_arguments(tool, call)
         payload = {
             "tool": tool.name,
             "args": dict(call["args"]),
@@ -1175,7 +1196,7 @@ class _ExecutionStrategySupport:
             decision = {"decision": decision}
         action = decision.get("decision", decision.get("action"))
         if action == "approve":
-            return dict(call["args"])
+            return validated_args
         if action == "edit" and isinstance(decision.get("args"), Mapping):
             return dict(decision["args"])
         if action == "reject":

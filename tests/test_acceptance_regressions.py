@@ -344,6 +344,105 @@ def test_hitl_does_not_replay_an_earlier_tool(decision, expected_sensitive):
     assert result["messages"][-1].content == "finished"
 
 
+def test_hitl_validates_sensitive_tool_args_before_pausing():
+    called = []
+
+    def sensitive(value: int) -> str:
+        called.append(value)
+        return f"sensitive:{value}"
+
+    tool = require_approval(
+        StructuredTool.from_function(
+            sensitive, name="sensitive", description="Sensitive action."
+        )
+    )
+    model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    tool_call("sensitive", {"unexpected": "invalid"}, "invalid-1")
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[tool_call("sensitive", {"value": 2}, "valid-1")],
+            ),
+            AIMessage(content="finished"),
+        ]
+    )
+    agent = create_agent(
+        name="hitl-validates-before-pause",
+        instructions="hitl",
+        model=model,
+        tools=[tool],
+    )
+
+    paused = agent.invoke("go", session_id="session")
+
+    assert paused.status == "paused"
+    assert len(paused.interrupts) == 1
+    assert paused.interrupts[0]["args"] == {"value": 2}
+    assert called == []
+    assert any(
+        isinstance(message, ToolMessage)
+        and message.tool_call_id == "invalid-1"
+        and "validation error" in message.content
+        for message in paused["messages"]
+    )
+
+    completed = agent.resume(session_id="session", decision="approve")
+
+    assert completed.output == "finished"
+    assert called == [2]
+
+
+def test_hitl_requires_approval_for_changed_tool_call():
+    called = []
+
+    def sensitive(value: str) -> str:
+        called.append(value)
+        return f"sensitive:{value}"
+
+    tool = require_approval(
+        StructuredTool.from_function(
+            sensitive, name="sensitive", description="Sensitive action."
+        )
+    )
+    model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[tool_call("sensitive", {"value": "first"}, "first-1")],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[tool_call("sensitive", {"value": "second"}, "second-1")],
+            ),
+            AIMessage(content="finished"),
+        ]
+    )
+    agent = create_agent(
+        name="hitl-changed-call-reapproval",
+        instructions="hitl",
+        model=model,
+        tools=[tool],
+    )
+
+    first_pause = agent.invoke("go", session_id="session")
+    assert first_pause.interrupts[0]["args"] == {"value": "first"}
+
+    second_pause = agent.resume(session_id="session", decision="approve")
+    assert second_pause.status == "paused"
+    assert second_pause.interrupts[0]["args"] == {"value": "second"}
+    assert called == ["first"]
+
+    completed = agent.resume(session_id="session", decision="approve")
+
+    assert completed.output == "finished"
+    assert called == ["first", "second"]
+
+
 @pytest.mark.parametrize("planning", [False, True])
 def test_main_resume_continues_sensitive_subagent(planning):
     sensitive_calls = []
