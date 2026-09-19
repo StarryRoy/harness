@@ -1,22 +1,26 @@
 # Agent Harness
 
-## Merge protection
+[![CI](https://github.com/StarryRoy/harness/actions/workflows/ci.yml/badge.svg)](https://github.com/StarryRoy/harness/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The CI workflow runs on every pull request and on pushes to the default `master`
-branch. Repository administrators must configure a GitHub ruleset (or branch
-protection rule) for `master`, require pull requests, and require these stable
-status-check names before merging:
+一个基于 [LangGraph](https://github.com/langchain-ai/langgraph) 的轻量级 Agent Runtime。
+Agent Harness 将 ReAct、会话管理、持久化 Checkpoint、上下文治理、Middleware、
+SubAgent 隔离、渐进式 Skill 以及可观测性收敛为一套稳定的应用层 API，让业务代码只需
+定义 Agent、模型和工具即可开始构建可靠的 AI 应用。
 
-- `Ruff`
-- `pytest (Python 3.11)`
-- `pytest (Python 3.12)`
+## 核心能力
 
-Branch protection is repository-side configuration and cannot be enforced by a
-workflow committed to this repository. The rule should also prevent bypassing
-these requirements for the roles that merge normal changes.
+- **统一 Agent API**：提供 `invoke`、`ainvoke`、`resume`、`stream` 等稳定入口。
+- **可靠的会话与持久化**：基于 LangGraph Checkpointer/Store 管理 Session、HITL 恢复和跨会话记忆。
+- **多种执行策略**：内置 ReAct 与 Plan & Execute，支持受限重试、重规划和结构化输出。
+- **可组合 Middleware**：内置重试、超时、调用上限、Guardrail、模型降级和人工审批能力。
+- **SubAgent 与 Skill**：提供隔离的 SubAgent Runtime，以及可发现、可加载、可卸载的渐进式 Skill。
+- **RAG 与数据库工具**：提供统一的混合检索封装和带安全边界的数据库 Toolkit。
+- **可观测性**：输出稳定的流式事件、运行指标和脱敏后的调试信息，便于接入日志与审计系统。
 
-基于 LangGraph 的轻量 Agent Runtime。Harness 管理 ReAct、会话、Checkpoint、
-Context、Middleware、SubAgent 隔离及渐进式 Skill；应用层只需定义 Agent。
+项目当前处于持续迭代阶段，API 可能随版本演进。欢迎通过 Issue 或 Pull Request
+反馈问题、分享使用场景或提出改进建议。
 
 ## 安装
 
@@ -439,3 +443,33 @@ pytest -q
 
 CI 在 Pull Request 上运行 Ruff，并在 Python 3.11、3.12 执行核心测试。测试默认
 使用临时 SQLite Checkpointer/Store，不把内存存储当作运行时持久化实现。
+
+## 参与贡献
+
+欢迎贡献代码、文档和测试。提交 Pull Request 前，请先确认：
+
+1. 变更范围和设计意图已在描述中说明；
+2. 新增或修改的行为有对应测试；
+3. 本地检查通过：`ruff check src tests` 和 `pytest -q`；
+4. 没有提交 API Key、Token、数据库密码或其他敏感信息。
+
+对于较大的功能改动，建议先创建 Issue 讨论方案，再开始实现。
+
+## 开源协议
+
+本项目基于 [MIT License](LICENSE) 发布。你可以自由使用、复制、修改和分发本项目，
+但需要保留原始版权声明和许可证文本。
+
+## 维护与安全
+
+请不要在公开 Issue、日志或测试数据中提交真实凭据和敏感业务数据。若发现可能影响用户
+安全的漏洞，请优先通过私下渠道联系维护者，并尽量提供复现步骤、影响范围和建议修复方向。
+
+## Merge protection
+
+CI 会在每个 Pull Request 以及推送到默认 `master` 分支时运行。仓库管理员应在 GitHub
+中配置规则集或分支保护规则，要求 Pull Request 通过以下稳定检查后才能合并：
+
+- `Ruff`
+- `pytest (Python 3.11)`
+- `pytest (Python 3.12)`
