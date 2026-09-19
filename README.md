@@ -441,8 +441,7 @@ ruff check src tests
 pytest -q
 ```
 
-CI 在 Pull Request 上运行 Ruff，并在 Python 3.11、3.12 执行核心测试。测试默认
-使用临时 SQLite Checkpointer/Store，不把内存存储当作运行时持久化实现。
+测试默认使用临时 SQLite Checkpointer/Store，不把内存存储当作运行时持久化实现。
 
 ## 参与贡献
 
@@ -464,12 +463,3 @@ CI 在 Pull Request 上运行 Ruff，并在 Python 3.11、3.12 执行核心测�
 
 请不要在公开 Issue、日志或测试数据中提交真实凭据和敏感业务数据。若发现可能影响用户
 安全的漏洞，请优先通过私下渠道联系维护者，并尽量提供复现步骤、影响范围和建议修复方向。
-
-## Merge protection
-
-CI 会在每个 Pull Request 以及推送到默认 `master` 分支时运行。仓库管理员应在 GitHub
-中配置规则集或分支保护规则，要求 Pull Request 通过以下稳定检查后才能合并：
-
-- `Ruff`
-- `pytest (Python 3.11)`
-- `pytest (Python 3.12)`
